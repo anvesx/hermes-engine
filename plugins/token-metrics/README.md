@@ -1,7 +1,8 @@
 # token-metrics plugin
 
 Measures every Claude Code task (tokens, cost, latency, frustration, outcome) by category, and ranks
-the 11 token leaks by estimated cost. Your settings.json hooks are not modified: plugin hooks run
+token leaks by estimated cost, using the categories from the team's Leak Categories canvas
+(see `token-leak-categories.md` at the repo root). Your settings.json hooks are not modified: plugin hooks run
 alongside your own. All data stays in `~/.claude/metrics/`.
 
 ## Use

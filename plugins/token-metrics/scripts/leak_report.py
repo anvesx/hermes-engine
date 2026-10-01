@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-leak_report.py - rank the 11 token-leak problems by estimated cost, from Claude Code transcripts.
+leak_report.py - rank token-leak categories by estimated cost, from Claude Code transcripts.
+
+Categories and numbering follow the team's "Leak Categories" canvas: the 11 core leaks (1-11),
+11 additional leaks (12-22), and three breakdowns of #4 Many agents (4a-4c).
 
 Works on existing history: Claude Code already saves every session as JSONL under
-~/.claude/projects/, so no setup is needed for 10 of the 11 leaks. The hook events from
-metrics_hook.py (optional) add idle-usage detection and frustration ratings.
+~/.claude/projects/, so most leaks need no setup. The hook events from metrics_hook.py
+(optional) add idle-usage detection and frustration ratings.
 
   python3 leak_report.py                       # all sessions
   python3 leak_report.py --since 2026-09-01 --md leak_report.md
@@ -12,12 +15,13 @@ metrics_hook.py (optional) add idle-usage detection and frustration ratings.
 
 How "cost" is estimated
   Token counts per model call come from the transcript (exact). The size of individual items
-  (a tool result, a prompt) is estimated at 4 characters per token. A leaked item is charged
-  for every later call that re-reads it, at the cache-read price, until the next compaction.
-  All prices are API list prices: for subscription users this is API-equivalent usage,
-  which is what drains the plan's allowance.
+  (a tool result, a prompt) is estimated at 4 characters per token; images from their pixel size.
+  A leaked item is charged for every later call that re-reads it, at the cache-read price, until
+  the next compaction. All prices are API list prices: for subscription users this is
+  API-equivalent usage, which is what drains the plan's allowance.
 """
 import argparse
+import base64
 import bisect
 import glob
 import hashlib
@@ -25,6 +29,7 @@ import json
 import os
 import re
 import statistics
+import struct
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -32,6 +37,7 @@ from datetime import datetime, timezone
 
 PRICES = {"fable": (10.00, 50.00, 0.25), "opus": (4.00, 20.00, 0.20),
           "sonnet": (2.00, 10.00, 0.20), "haiku": (1.00, 5.00, 0.10)}   # in, out, cache read per MTok
+TOP_TIER = ("opus", "fable")
 CHARS_PER_TOKEN = 4
 START_BASELINE = 10_000        # starting context considered reasonable
 CARRY_MIN = 20_000             # history carried into a new task before it counts as a leak
@@ -39,19 +45,65 @@ TASK_GAP_S = 30 * 60           # an untagged prompt after this much idle time st
 EXPLORE_LIMIT = 15             # reads/searches before the first edit considered reasonable
 BIG_RESULT = 4_000             # tool result size that counts as oversized
 BIG_KEEP = 2_000               # portion of an oversized result that is charged as useful
+IMAGE_DEFAULT = 1_600          # tokens for an image whose size can't be read
+TRIVIAL_TEXT = 300             # a reply this short, with no tool calls, is a trivial turn
+THINK_BASELINE = 1_000         # reasoning tokens considered reasonable on a trivial turn
+THINK_LIMIT = 3_000            # reasoning tokens on a trivial turn before it counts as a leak
+VISUAL_LIMIT = 3               # edit -> screenshot cycles per task considered reasonable
+FORK_MIN = 50_000              # a helper agent starting this large inherited its parent's context
+REPORT_BIG = 2_500             # helper-agent report size that counts as oversized
+REPORT_KEEP = 1_000            # portion of an agent report that is charged as useful
+RELEARN_MIN = 2                # earlier sessions that explored a file before re-reading counts
+REPEAT_SIM = 0.6               # first-prompt word overlap that counts as the same task
 SIMPLE_CATEGORIES = {"docs", "explain", "question", "rename", "chore", "commit"}
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
+AGENT_TOOLS = {"Agent", "Task"}
 DEP_DIRS = re.compile(r"(^|/)(node_modules|\.venv|venv|dist|build|target|\.next|vendor|__pycache__)/")
 ERROR_TEXT = re.compile(r"(error|failed|traceback|exception|exit code [1-9]|not found)", re.I)
+DENIED_RE = re.compile(r"(doesn't want to proceed|permission|denied|rejected|not allowed|blocked)", re.I)
+SCHEMA_RE = re.compile(r"(InputValidationError|invalid (input|param|argument|type)|required (parameter|property)|"
+                       r"missing required|schema|unexpected (field|parameter|property))", re.I)
+WRONG_ID_RE = re.compile(r"(not found|no such|does not exist|unknown (id|tool)|\b404\b)", re.I)
 TAG_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*)\]")
+# same pattern as metrics_hook.py, so both scripts agree on what a correction is
+CORRECTION_RE = re.compile(
+    r"^\s*(no\b|nope\b|wrong\b|that'?s not|that is not|not what i|undo\b|revert\b|stop\b|"
+    r"don'?t\b|you (broke|missed|forgot|ignored)|i said\b|again\b)", re.I)
 
+# id: (label, name, category). Labels and categories follow the "Leak Categories" canvas.
 LEAKS = {
-    1: "Sessions that never end", 2: "Heavy starting context", 3: "No clear direction",
-    4: "Too much tool output", 5: "Bigger model than needed", 6: "Losing the cache",
-    7: "Many agents", 8: "Retry loops", 9: "Usage while idle", 10: "Wordy responses",
-    11: "No visibility",
+    1: ("1", "Heavy starting context", "Persistent instructions and memory"),
+    2: ("2", "Sessions that never end", "Conversation history"),
+    3: ("3", "Losing the cache", "Cache misses and invalidation"),
+    4: ("4", "Many agents", "Multi-agent workflows"),
+    23: ("4a", "Fork context duplication", "Multi-agent workflows"),
+    24: ("4b", "Overlapping agents", "Multi-agent workflows"),
+    25: ("4c", "Verbose agent reports", "Multi-agent workflows"),
+    5: ("5", "No clear direction", "Repository discovery and file reading"),
+    6: ("6", "Bigger model than needed", "Model selection and reasoning"),
+    7: ("7", "Too much tool output", "Tools, MCP, skills, and plugins"),
+    8: ("8", "Wordy responses", "Answer and artifact generation"),
+    9: ("9", "Retry loops", "Retries, automation, and context rebuilding"),
+    10: ("10", "Usage while idle", "Retries, automation, and context rebuilding"),
+    11: ("11", "No visibility", "Observability coverage"),
+    12: ("12", "MCP tool schema bloat", "Tools, MCP, skills, and plugins"),
+    13: ("13", "Unused skills/plugins", "Tools, MCP, skills, and plugins"),
+    14: ("14", "Screenshot accumulation", "Images, PDFs, and browser interaction"),
+    15: ("15", "Repeated tasks across sessions", "Conversation history"),
+    16: ("16", "Failed/denied tool calls", "Retries, automation, and context rebuilding"),
+    17: ("17", "Noisy commands", "Terminal, build, and test output"),
+    18: ("18", "High effort on trivial turns", "Model selection and reasoning"),
+    19: ("19", "Compaction cost", "Retries, automation, and context rebuilding"),
+    20: ("20", "Correction churn", "Retries, automation, and context rebuilding"),
+    21: ("21", "Visual iteration loops", "Images, PDFs, and browser interaction"),
+    22: ("22", "Re-learning the codebase", "Repository discovery and file reading"),
 }
-SPEND_NOT_WASTE = {7}   # reported as spend to review, not counted as pure waste
+PARENT = {23: 4, 24: 4, 25: 4}
+SPEND_NOT_WASTE = {4, 15}   # reported as spend to review, not counted as pure waste
+NOT_MEASURED = {   # transcripts don't record what was loaded, only what was used
+    12: "not measured yet: needs the loaded tool definitions (part of #1)",
+    13: "not measured yet: needs the loaded skill listings (part of #1)",
+}
 
 
 def tok(chars):
@@ -61,6 +113,11 @@ def tok(chars):
 def price(model):
     m = (model or "").lower()
     return next((p for k, p in PRICES.items() if k in m), PRICES["sonnet"])
+
+
+def top_tier(model):
+    m = (model or "").lower()
+    return any(k in m for k in TOP_TIER)
 
 
 def ts_of(s):
@@ -85,11 +142,41 @@ def text_of(content, limit=4000):
         return " ".join(c.get("text", "") for c in content if isinstance(c, dict))[:limit]
     return ""
 
+
+def image_tokens(block):
+    """Tokens for one base64 image block: (w * h) / 750 after the API's downscaling."""
+    w = h = 0
+    try:
+        raw = base64.b64decode((block.get("source") or {}).get("data", "")[:65536])
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", raw[16:24])
+        elif raw[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(raw):
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = raw[i + 1]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", raw[i + 5:i + 9])
+                    break
+                i += 2 + struct.unpack(">H", raw[i + 2:i + 4])[0]
+    except Exception:
+        pass
+    if not w or not h:
+        return IMAGE_DEFAULT
+    scale = min(1.0, 1568 / max(w, h), (1_150_000 / (w * h)) ** 0.5)
+    return int(w * scale * h * scale / 750)
+
+
+def prompt_words(text):
+    return set(re.findall(r"[a-z0-9_]{3,}", TAG_RE.sub("", text, count=1).lower()))
+
 # ------------------------------------------------------------------ loading
 
 
 def load_sessions(root, since):
-    """Group transcript entries by session; mark helper-agent entries."""
+    """Group transcript entries by session; mark helper-agent entries and which agent wrote them."""
     sessions = defaultdict(list)
     for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
         helper_file = "subagent" in path.lower() or os.path.basename(path).startswith("agent-")
@@ -107,6 +194,7 @@ def load_sessions(root, since):
                     sid = e.get("sessionId") or os.path.splitext(os.path.basename(path))[0]
                     e["_t"], e["_n"], e["_project"] = t, n, project
                     e["_helper"] = bool(e.get("isSidechain")) or helper_file
+                    e["_agent"] = (path if helper_file else e.get("agentId") or "sidechain") if e["_helper"] else None
                     sessions[sid].append(e)
         except OSError:
             continue
@@ -138,44 +226,63 @@ class Session:
         self.write_mult, self.ttl_s = write_mult, ttl_s
         self.hook_prompts = hook_prompts
         self.calls, self.helper_calls = [], []      # assistant model calls
+        self.agents = defaultdict(list)             # helper calls by agent
         self.prompts, self.tool_uses, self.results = [], {}, []
-        self.compactions = []
+        self.helper_tool_uses, self.helper_results = {}, []
+        self.compactions, self.summaries = [], []
         self._parse(entries)
         self._segments()
 
     # -- parsing ---------------------------------------------------------------
+    def _result(self, e, b):
+        content = b.get("content")
+        txt = text_of(content)
+        images = [c for c in content if isinstance(c, dict) and c.get("type") == "image"] if isinstance(content, list) else []
+        return {"t": e["_t"], "id": b.get("tool_use_id"), "agent": e["_agent"],
+                "tokens": tok(text_len(content)), "image_tokens": sum(image_tokens(i) for i in images),
+                "is_error": bool(b.get("is_error")),
+                "error": bool(b.get("is_error")) or bool(ERROR_TEXT.search(txt[:600])),
+                "text": txt}
+
     def _parse(self, entries):
-        by_id = {}
+        by_id, boundaries = {}, []
         for e in entries:
             msg = e.get("message") or {}
             content = msg.get("content")
-            if e.get("type") == "system" and e.get("subtype") == "compact_boundary" or e.get("isCompactSummary"):
+            if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
                 if not e["_helper"]:
-                    self.compactions.append(e["_t"])
+                    boundaries.append(e["_t"])
+                continue
+            if e.get("isCompactSummary"):
+                if not e["_helper"]:
+                    self.summaries.append((e["_t"], tok(text_len(content))))
                 continue
             if e.get("type") == "assistant" and msg.get("usage"):
                 mid = msg.get("id") or e.get("uuid")
                 c = by_id.get(mid)
                 if c is None:
-                    c = {"t": e["_t"], "model": msg.get("model", ""), "blocks": [], "helper": e["_helper"]}
+                    c = {"t": e["_t"], "model": msg.get("model", ""), "blocks": [],
+                         "helper": e["_helper"], "agent": e["_agent"]}
                     by_id[mid] = c
-                    (self.helper_calls if e["_helper"] else self.calls).append(c)
+                    if e["_helper"]:
+                        self.helper_calls.append(c)
+                        self.agents[e["_agent"]].append(c)
+                    else:
+                        self.calls.append(c)
                 c["usage"] = msg["usage"]
                 if isinstance(content, list):
                     c["blocks"].extend(b for b in content if isinstance(b, dict))
-            elif e.get("type") == "user" and not e["_helper"]:
+            elif e.get("type") == "user":
                 if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
                     for b in content:
                         if isinstance(b, dict) and b.get("type") == "tool_result":
-                            txt = text_of(b.get("content"))
-                            self.results.append({"t": e["_t"], "id": b.get("tool_use_id"),
-                                                 "tokens": tok(text_len(b.get("content"))),
-                                                 "error": bool(b.get("is_error")) or bool(ERROR_TEXT.search(txt[:600])),
-                                                 "text": txt})
-                elif not e.get("isMeta"):
+                            (self.helper_results if e["_helper"] else self.results).append(self._result(e, b))
+                elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
                     if txt and "interrupted by user" not in txt:
                         self.prompts.append({"t": e["_t"], "tokens": tok(len(txt)), "text": txt})
+        # one compaction writes a boundary marker and a summary; count boundaries when present
+        self.compactions = boundaries or [t for t, _ in self.summaries]
 
         for c in self.calls + self.helper_calls:
             u = c["usage"]
@@ -187,17 +294,18 @@ class Session:
             pi, po, pr = price(c["model"])
             c["cost"] = (c["in"] * pi + c["cw"] * pi * self.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
             c["read_price"] = pr / 1e6
-            if c["helper"]:
-                continue   # helper agents' tool calls are not part of the main context
+            uses = self.helper_tool_uses if c["helper"] else self.tool_uses
+            c["n_tools"] = 0
             for b in c["blocks"]:
                 if b.get("type") == "tool_use":
-                    self.tool_uses[b.get("id")] = {"t": c["t"], "name": b.get("name"),
-                                                  "input": b.get("input") or {}, "call": c}
-        for r in self.results:
-            tu = self.tool_uses.get(r["id"])
-            r["name"] = tu["name"] if tu else None
-            r["input"] = tu["input"] if tu else {}
-            r["call"] = tu["call"] if tu else None
+                    c["n_tools"] += 1
+                    uses[b.get("id")] = {"t": c["t"], "name": b.get("name"), "input": b.get("input") or {}, "call": c}
+        for results, uses in ((self.results, self.tool_uses), (self.helper_results, self.helper_tool_uses)):
+            for r in results:
+                tu = uses.get(r["id"])
+                r["name"] = tu["name"] if tu else None
+                r["input"] = tu["input"] if tu else {}
+                r["call"] = tu["call"] if tu else None
         self.cost = sum(c["cost"] for c in self.calls)
         self.helper_cost = sum(c["cost"] for c in self.helper_calls)
 
@@ -221,6 +329,14 @@ class Session:
         j = bisect.bisect_left(self.call_times, end_t)
         return tokens * (self.prefix_read[j] - self.prefix_read[i]) if j > i else 0.0
 
+    def next_call(self, t):
+        i = bisect.bisect_right(self.call_times, t)
+        return self.call_times[i] if i < len(self.call_times) else None
+
+    def agent_carry(self, agent, t, tokens):
+        """Cost of re-reading `tokens` on every later call of one helper agent."""
+        return tokens * sum(c["read_price"] for c in self.agents.get(agent, []) if c["t"] > t)
+
     # -- tasks -------------------------------------------------------------------
     def tasks(self):
         out = []
@@ -241,6 +357,10 @@ class Session:
 # ------------------------------------------------------------------ leak detectors
 
 
+def add_finding(findings, leak, s, cost, detail):
+    findings[leak].append({"cost": cost, "session": s.sid[:8], "project": s.project, "detail": detail})
+
+
 def analyse(s: Session, findings):
     if not s.calls:
         return
@@ -248,28 +368,85 @@ def analyse(s: Session, findings):
     first = s.calls[0]
     first_prompt = s.prompts[0]["tokens"] if s.prompts else 0
     prefix = max(0, first["ctx"] - first_prompt)
+    results = sorted(s.results, key=lambda r: r["t"])
 
     def add(leak, cost, detail):
-        findings[leak].append({"cost": cost, "session": s.sid[:8], "project": s.project, "detail": detail})
+        add_finding(findings, leak, s, cost, detail)
 
-    # 2. Heavy starting context: excess over the baseline, re-read on every call
+    # 1. Heavy starting context: excess over the baseline, re-read on every call
     findings["_prefix_sizes"].append(prefix)
     if prefix > START_BASELINE:
         extra = prefix - START_BASELINE
-        add(2, extra * s.prefix_read[-1], f"starting context ~{prefix:,} tokens over {len(s.calls)} calls")
+        add(1, extra * s.prefix_read[-1], f"starting context ~{prefix:,} tokens over {len(s.calls)} calls")
 
-    # 1. Sessions that never end: history carried from earlier tasks into later ones
+    # 2. Sessions that never end: history carried from earlier tasks into later ones
     for tsk in tasks[1:]:
         if not tsk["calls"]:
             continue
         carried = tsk["calls"][0]["ctx"] - prefix - tsk["prompt_tokens"]
         if carried > CARRY_MIN:
-            add(1, s.carry(tsk["start"], carried, until=tsk["end"]),
+            add(2, s.carry(tsk["start"], carried, until=tsk["end"]),
                 f"new task ({tsk['category'] or 'after ' + str(TASK_GAP_S // 60) + ' min gap'}) carried ~{carried:,} old tokens")
     if len(s.compactions):
         findings["_compactions"].append(len(s.compactions))
 
-    # 3. No clear direction: exploration calls before the first edit, beyond the limit
+    # 3. Losing the cache: large rewrites after the first call, with likely cause.
+    # 19. Compaction cost: rewrites right after a compaction, plus writing the summary.
+    comp = s.comp_sorted
+    compaction = {x: {"summary": 0, "rewrite": 0.0, "tokens": 0} for x in comp}
+    for t, summary in s.summaries:
+        k = bisect.bisect_right(comp, t + 5) - 1
+        if k >= 0:
+            compaction[comp[k]]["summary"] += summary
+    for i in range(1, len(s.calls)):
+        c, prev = s.calls[i], s.calls[i - 1]
+        if c["cw"] > max(5_000, 0.5 * c["ctx"]):
+            pi, _, pr = price(c["model"])
+            premium = c["cw"] * (pi * s.write_mult - pr) / 1e6
+            x = next((x for x in comp if prev["t"] < x <= c["t"]), None)
+            if x is not None:
+                compaction[x]["rewrite"] += premium
+                compaction[x]["tokens"] += c["cw"]
+                continue
+            gap = c["t"] - prev["t"]
+            if c["model"] != prev["model"]:
+                cause = "model switch"
+            elif gap >= 3600:
+                cause = f"break of {gap / 60:.0f} min"
+            elif gap >= s.ttl_s:
+                cause = f"break of {gap / 60:.0f} min (past cache lifetime)"
+            else:
+                cause = "context changed (tools, instructions, settings)"
+            add(3, premium, f"~{c['cw']:,} tokens rewritten, {cause}")
+    for x, cc in compaction.items():
+        k = bisect.bisect_left(s.call_times, x) - 1
+        out_price = price(s.calls[max(0, k)]["model"])[1]
+        add(19, cc["summary"] * out_price / 1e6 + cc["rewrite"],
+            f"compaction: ~{cc['summary']:,} summary tokens written, ~{cc['tokens']:,} tokens rewritten after")
+
+    # 4. Many agents: helper spend (to review, not all waste)
+    if s.helper_calls:
+        add(4, s.helper_cost, f"{len(s.helper_calls)} helper calls, {s.helper_cost / max(1e-9, s.cost + s.helper_cost):.0%} of session cost")
+
+    # 4a. Fork context duplication: helper agents that start with the parent's context
+    for calls in s.agents.values():
+        first_ctx = calls[0]["ctx"]
+        if first_ctx > FORK_MIN:
+            add(23, (first_ctx - START_BASELINE) * sum(c["read_price"] for c in calls),
+                f"helper agent started with ~{first_ctx:,} tokens over {len(calls)} calls")
+
+    # 4b. Overlapping agents: a file already read by a sibling agent, charged to the later reader
+    readers = defaultdict(set)
+    for r in sorted(s.helper_results, key=lambda r: r["t"]):
+        path = r["input"].get("file_path", "")
+        if r["name"] != "Read" or not path:
+            continue
+        if readers[path] and r["agent"] not in readers[path]:
+            add(24, s.agent_carry(r["agent"], r["t"], r["tokens"]),
+                f"{os.path.basename(path)} also read by a sibling agent (~{r['tokens']:,} tokens)")
+        readers[path].add(r["agent"])
+
+    # 5. No clear direction: exploration calls before the first edit, beyond the limit
     for tsk in tasks:
         uses = sorted([u for u in s.tool_uses.values() if tsk["start"] <= u["t"] < tsk["end"]], key=lambda u: u["t"])
         first_edit = next((u["t"] for u in uses if u["name"] in EDIT_TOOLS), None)
@@ -278,99 +455,65 @@ def analyse(s: Session, findings):
         explore = [u for u in uses if u["t"] < first_edit]
         if len(explore) > EXPLORE_LIMIT:
             calls = {id(u["call"]): u["call"] for u in explore[EXPLORE_LIMIT:]}
-            add(3, sum(c["cost"] for c in calls.values()),
+            add(5, sum(c["cost"] for c in calls.values()),
                 f"{len(explore)} reads/searches before the first edit")
 
-    # 4. Too much tool output: duplicate reads, dependency-folder hits, oversized results
+    # 6. Bigger model than needed: premium models on simple categories, and premium helpers
+    for tsk in tasks:
+        if tsk["category"] in SIMPLE_CATEGORIES:
+            for c in tsk["calls"]:
+                if top_tier(c["model"]):
+                    pi, po, pr = PRICES["sonnet"]
+                    cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
+                    add(6, c["cost"] - cheaper, f"[{tsk['category']}] task on {c['model']}")
+    for c in s.helper_calls:
+        if top_tier(c["model"]):
+            pi, po, pr = PRICES["sonnet"]
+            cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
+            add(6, c["cost"] - cheaper, f"helper agent on {c['model']}")
+    findings["_main_cost"].append(s.cost)
+    findings["_top_tier_cost"].append(sum(c["cost"] for c in s.calls if top_tier(c["model"])))
+
+    # 7. Too much tool output: duplicate reads, dependency-folder hits, oversized results.
+    # Split out by source: 14 images, 16 failed calls, 17 shell output, 4c agent reports.
     seen_reads, edited_since = {}, set()
-    for r in sorted(s.results, key=lambda r: r["t"]):
+    for r in results:
         name, inp = r["name"], r["input"]
         path = inp.get("file_path") or inp.get("path") or inp.get("notebook_path") or ""
         if name in EDIT_TOOLS and path:
             edited_since.add(path)
+        if r["image_tokens"]:
+            nxt = s.next_call(r["t"])
+            add(14, s.carry(nxt, r["image_tokens"]) if nxt else 0.0,
+                f"{name} image ~{r['image_tokens']:,} tokens kept in context")
+        if r["is_error"] and "interrupted by user" not in r["text"]:
+            kind = ("denied" if DENIED_RE.search(r["text"]) else "schema error" if SCHEMA_RE.search(r["text"])
+                    else "wrong id/path" if WRONG_ID_RE.search(r["text"]) else "error")
+            call = r["call"]
+            wasted = call["out"] * price(call["model"])[1] / 1e6 / max(1, call["n_tools"]) if call else 0.0
+            add(16, wasted + s.carry(r["t"], r["tokens"]), f"{name} {kind} (~{r['tokens']:,} tokens of error text)")
         if name == "Read" and path:
             key = (path, inp.get("offset"), inp.get("limit"))
             if key in seen_reads and path not in edited_since:
-                add(4, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
+                add(7, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
                 continue
             seen_reads[key] = r["t"]
             edited_since.discard(path)
+        if name in AGENT_TOOLS:
+            if r["tokens"] > REPORT_BIG:
+                add(25, s.carry(r["t"], r["tokens"] - REPORT_KEEP),
+                    f"agent report ~{r['tokens']:,} tokens ({str(inp.get('description', ''))[:40] or name})")
+            continue
         dep_lines = [l for l in r["text"].splitlines() if DEP_DIRS.search(l)]
         if name in ("Grep", "Glob", "Bash", "LS") and len(dep_lines) >= 5:
             dep_tokens = int(r["tokens"] * len(dep_lines) / max(1, len(r["text"].splitlines())))
-            add(4, s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
+            add(7, s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
         elif r["tokens"] > BIG_RESULT:
             what = os.path.basename(path) if path else (str(inp.get("command", ""))[:40] or name)
-            add(4, s.carry(r["t"], r["tokens"] - BIG_KEEP), f"{name} result ~{r['tokens']:,} tokens ({what})")
+            add(17 if name == "Bash" else 7, s.carry(r["t"], r["tokens"] - BIG_KEEP),
+                f"{name} result ~{r['tokens']:,} tokens ({what})")
 
-    # 5. Bigger model than needed: premium models on simple categories, and premium helpers
-    for tsk in tasks:
-        if tsk["category"] in SIMPLE_CATEGORIES:
-            for c in tsk["calls"]:
-                m = c["model"].lower()
-                if "opus" in m or "fable" in m:
-                    pi, po, pr = PRICES["sonnet"]
-                    cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
-                    add(5, c["cost"] - cheaper, f"[{tsk['category']}] task on {c['model']}")
-    for c in s.helper_calls:
-        m = c["model"].lower()
-        if "opus" in m or "fable" in m:
-            pi, po, pr = PRICES["sonnet"]
-            cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
-            add(5, c["cost"] - cheaper, f"helper agent on {c['model']}")
-    for c in s.calls:
-        think = sum(len(b.get("thinking", "")) for b in c["blocks"] if b.get("type") == "thinking")
-        findings["_thinking"].append(tok(think))
-
-    # 6. Losing the cache: large rewrites after the first call, with likely cause
-    comp = s.comp_sorted
-    for i in range(1, len(s.calls)):
-        c, prev = s.calls[i], s.calls[i - 1]
-        if c["cw"] > max(5_000, 0.5 * c["ctx"]):
-            gap = c["t"] - prev["t"]
-            if any(prev["t"] < x <= c["t"] for x in comp):
-                cause = "after compaction"
-            elif c["model"] != prev["model"]:
-                cause = "model switch"
-            elif gap >= 3600:
-                cause = f"break of {gap / 60:.0f} min"
-            elif gap >= s.ttl_s:
-                cause = f"break of {gap / 60:.0f} min (past cache lifetime)"
-            else:
-                cause = "context changed (tools, instructions, settings)"
-            pi, _, pr = price(c["model"])
-            add(6, c["cw"] * (pi * s.write_mult - pr) / 1e6, f"~{c['cw']:,} tokens rewritten, {cause}")
-
-    # 7. Many agents: helper spend (to review, not all waste)
-    if s.helper_calls:
-        add(7, s.helper_cost, f"{len(s.helper_calls)} helper calls, {s.helper_cost / max(1e-9, s.cost + s.helper_cost):.0%} of session cost")
-
-    # 8. Retry loops: the same failing tool call repeated; charge attempts after the second
-    attempts = defaultdict(int)
-    for r in sorted(s.results, key=lambda r: r["t"]):
-        if not r["call"]:
-            continue
-        key = (r["name"], hashlib.md5(json.dumps(r["input"], sort_keys=True).encode()).hexdigest())
-        if r["error"]:
-            attempts[key] += 1
-            if attempts[key] >= 3:
-                add(8, r["call"]["cost"], f"{r['name']} failed {attempts[key]} times with the same input")
-        else:
-            attempts[key] = 0
-
-    # 9. Usage while idle: prompts not typed by the developer (needs hook data)
-    hp = s.hook_prompts.get(s.sid)
-    if hp is not None:
-        typed = [e["ts"] for e in hp]
-        for n, p in enumerate(s.prompts):
-            if not any(abs(p["t"] - t) < 15 for t in typed):
-                end = s.prompts[n + 1]["t"] if n + 1 < len(s.prompts) else float("inf")
-                cost = sum(c["cost"] for c in s.calls if p["t"] <= c["t"] < end)
-                if cost:
-                    add(9, cost, "turn started without a typed prompt (scheduled task, loop or background message)")
-        findings["_hook_sessions"].append(s.sid)
-
-    # 10. Wordy responses: output share and whole-file rewrites of existing files
+    # 8. Wordy responses: output share and whole-file rewrites of existing files
     findings["_output_cost"].append(sum(c["out"] * price(c["model"])[1] / 1e6 for c in s.calls))
     read_paths = set()
     for u in sorted(s.tool_uses.values(), key=lambda u: u["t"]):
@@ -379,12 +522,153 @@ def analyse(s: Session, findings):
             read_paths.add(path)
         elif u["name"] == "Write" and path in read_paths:
             out_tokens = tok(len(u["input"].get("content", "")))
-            add(10, out_tokens * price(u["call"]["model"])[1] / 1e6,
+            add(8, out_tokens * price(u["call"]["model"])[1] / 1e6,
                 f"rewrote whole file {os.path.basename(path)} (~{out_tokens:,} tokens)")
+
+    # 9. Retry loops: the same failing tool call repeated; charge attempts after the second
+    attempts = defaultdict(int)
+    for r in results:
+        if not r["call"]:
+            continue
+        key = (r["name"], hashlib.md5(json.dumps(r["input"], sort_keys=True).encode()).hexdigest())
+        if r["error"]:
+            attempts[key] += 1
+            if attempts[key] >= 3:
+                add(9, r["call"]["cost"], f"{r['name']} failed {attempts[key]} times with the same input")
+        else:
+            attempts[key] = 0
+
+    # 10. Usage while idle: prompts not typed by the developer (needs hook data)
+    hp = s.hook_prompts.get(s.sid)
+    if hp is not None:
+        typed = [e["ts"] for e in hp]
+        for n, p in enumerate(s.prompts):
+            if not any(abs(p["t"] - t) < 15 for t in typed):
+                end = s.prompts[n + 1]["t"] if n + 1 < len(s.prompts) else float("inf")
+                cost = sum(c["cost"] for c in s.calls if p["t"] <= c["t"] < end)
+                if cost:
+                    add(10, cost, "turn started without a typed prompt (scheduled task, loop or background message)")
+        findings["_hook_sessions"].append(s.sid)
+
+    # 18. High effort on trivial turns: a turn answered in one short reply with no tool calls,
+    # whose output tokens (which include reasoning) far exceed the reply itself
+    prompt_times = [p["t"] for p in s.prompts]
+    turn_calls = defaultdict(list)
+    for c in s.calls:
+        turn_calls[bisect.bisect_right(prompt_times, c["t"])].append(c)
+    for calls in turn_calls.values():
+        c = calls[0]
+        think = sum(len(b.get("thinking", "")) for b in c["blocks"] if b.get("type") == "thinking")
+        findings["_thinking"].append(tok(think))
+        if len(calls) != 1 or c["n_tools"]:
+            continue
+        reply = tok(sum(len(b.get("text", "")) for b in c["blocks"] if b.get("type") == "text"))
+        reasoning = c["out"] - reply
+        if reply <= TRIVIAL_TEXT and reasoning > THINK_LIMIT:
+            add(18, (reasoning - THINK_BASELINE) * price(c["model"])[1] / 1e6,
+                f"~{reasoning:,} reasoning tokens for a ~{reply:,}-token reply")
+
+    # 20. Correction churn: work done in turns that start by correcting the previous answer
+    for n, p in enumerate(s.prompts):
+        if CORRECTION_RE.match(TAG_RE.sub("", p["text"], count=1)):
+            end = s.prompts[n + 1]["t"] if n + 1 < len(s.prompts) else float("inf")
+            calls = [c for c in s.calls if p["t"] <= c["t"] < end]
+            if calls:
+                add(20, sum(c["cost"] for c in calls), f"correction turn, {len(calls)} calls of rework")
+
+    # 21. Visual iteration loops: edit -> screenshot cycles in one task, beyond the limit
+    for tsk in tasks:
+        cycles, edited = [], False
+        for r in results:
+            if not tsk["start"] <= r["t"] < tsk["end"]:
+                continue
+            name = r["name"] or ""
+            if name in EDIT_TOOLS or name.endswith("__use_figma"):
+                edited = True
+            elif edited and (r["image_tokens"] or "screenshot" in name.lower()):
+                cycles.append(r["t"])
+                edited = False
+        for k in range(VISUAL_LIMIT, len(cycles)):
+            add(21, sum(c["cost"] for c in tsk["calls"] if cycles[k - 1] < c["t"] <= cycles[k]),
+                f"edit -> screenshot cycle {k + 1} in one task")
+
+    # inputs for the cross-session leaks (15, 22)
+    edits = [r["t"] for r in results if r["name"] in EDIT_TOOLS]
+    first_edit = edits[0] if edits else float("inf")
+    s.explore, seen = [], set()
+    for r in results:
+        path = r["input"].get("file_path", "")
+        if r["name"] == "Read" and path and r["t"] < first_edit and path not in seen:
+            seen.add(path)
+            s.explore.append((path, r["tokens"], r["t"]))
+    first_typed = next((p["text"] for p in s.prompts if not p["text"].lstrip().startswith("<")), "")
+    s.first_words = prompt_words(first_typed)
 
     findings["_sessions"].append(s)
 
+
+def cross_session(findings):
+    """Leaks that need several sessions of the same project: 15 and 22."""
+    by_project = defaultdict(list)
+    for s in findings["_sessions"]:
+        by_project[s.project].append(s)
+    for ss in by_project.values():
+        ss.sort(key=lambda s: s.calls[0]["t"])
+        explored, earlier = defaultdict(int), []
+        for s in ss:
+            # 22. Re-learning the codebase: exploring files that earlier sessions already explored
+            hits = [(p, n, t) for p, n, t in s.explore if explored[p] >= RELEARN_MIN]
+            if hits:
+                add_finding(findings, 22, s, sum(s.carry(t, n) for _, n, t in hits),
+                            f"{len(hits)} files re-read before the first edit that {RELEARN_MIN}+ earlier sessions also explored")
+            for p, _, _ in s.explore:
+                explored[p] += 1
+            # 15. Repeated tasks across sessions: the same first request as an earlier session
+            if len(s.first_words) < 5:
+                continue
+            match = next((e for e in earlier
+                          if len(s.first_words & e.first_words) / len(s.first_words | e.first_words) >= REPEAT_SIM), None)
+            if match:
+                day = datetime.fromtimestamp(match.calls[0]["t"], timezone.utc).date()
+                add_finding(findings, 15, s, s.cost + s.helper_cost,
+                            f"first request matches session {match.sid[:8]} from {day}")
+            earlier.append(s)
+
 # ------------------------------------------------------------------ report
+
+
+def note_for(k, findings, total, sessions):
+    if k in NOT_MEASURED:
+        return NOT_MEASURED[k]
+    if k in PARENT:
+        return f"part of #{PARENT[k]}"
+    if k == 4:
+        return "spend to review, not all waste"
+    if k == 15:
+        return "spend to review: the earlier attempt may have failed"
+    if k == 10 and not findings["_hook_sessions"]:
+        return "needs hook data"
+    if k == 11:
+        have = len(set(findings["_hook_sessions"]))
+        return f"{have}/{len(sessions)} sessions have hook data (categories, ratings, idle detection)"
+    if k == 8:
+        out = sum(findings["_output_cost"])
+        return f"all output is {out / total:.1%} of spend" if total else ""
+    if k == 1 and findings["_prefix_sizes"]:
+        return f"median starting context ~{int(statistics.median(findings['_prefix_sizes'])):,} tokens"
+    if k == 2 and findings["_compactions"]:
+        return f"{sum(findings['_compactions'])} compactions"
+    if k == 6:
+        main = sum(findings["_main_cost"])
+        return f"{sum(findings['_top_tier_cost']) / main:.0%} of main-session spend on Opus/Fable" if main else ""
+    if k == 18:
+        visible = [t for t in findings["_thinking"] if t]
+        return f"median visible thinking ~{int(statistics.median(visible)):,} tokens/turn" if visible else ""
+    if k == 14:
+        return "assumes screenshots stay in context until compaction"
+    if k == 19:
+        return "the summary call's input is not in transcripts"
+    return ""
 
 
 def report(findings, md_path=None, top=3):
@@ -395,39 +679,25 @@ def report(findings, md_path=None, top=3):
     days = sorted({datetime.fromtimestamp(c["t"], timezone.utc).date() for s in sessions for c in s.calls})
     w(f"# Token leak report\n")
     w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, API-equivalent spend ${total:,.2f}\n" if days else "no data\n")
-    w("| # | Leak | Est. cost | Share of spend | Instances | Note |")
-    w("|---|---|---|---|---|---|")
+    w("| # | Leak | Category | Est. cost | Share of spend | Instances | Note |")
+    w("|---|---|---|---|---|---|---|")
     rows = []
-    for k, name in LEAKS.items():
+    for k, (label, name, group) in LEAKS.items():
         items = findings.get(k, [])
-        cost = sum(i["cost"] for i in items)
-        rows.append((k, name, cost, len(items)))
-    for k, name, cost, n in sorted(rows, key=lambda r: -r[2]):
-        note = ""
-        if k in SPEND_NOT_WASTE:
-            note = "spend to review, not all waste"
-        elif k == 9 and not findings["_hook_sessions"]:
-            note = "needs hook data"
-        elif k == 11:
-            have = len(set(findings["_hook_sessions"]))
-            note = f"{have}/{len(sessions)} sessions have hook data (categories, ratings, idle detection)"
-        elif k == 10:
-            out = sum(findings["_output_cost"])
-            note = f"all output is {out / total:.1%} of spend" if total else ""
-        elif k == 2 and findings["_prefix_sizes"]:
-            note = f"median starting context ~{int(statistics.median(findings['_prefix_sizes'])):,} tokens"
-        elif k == 1 and findings["_compactions"]:
-            note = f"{sum(findings['_compactions'])} compactions"
-        elif k == 5 and findings["_thinking"]:
-            visible = [t for t in findings["_thinking"] if t]
-            note = f"median visible thinking ~{int(statistics.median(visible)):,} tokens/call" if visible else ""
+        rows.append((k, label, name, group, sum(i["cost"] for i in items), len(items)))
+    rows.sort(key=lambda r: (r[0] in NOT_MEASURED, -r[4]))
+    for k, label, name, group, cost, n in rows:
+        note = note_for(k, findings, total, sessions)
+        if k in NOT_MEASURED:
+            w(f"| {label} | {name} | {group} | - | - | - | {note} |")
+            continue
         share = f"{cost / total:.1%}" if total else "-"
-        w(f"| {k} | {name} | ${cost:,.2f} | {share} | {n} | {note} |")
+        w(f"| {label} | {name} | {group} | ${cost:,.2f} | {share} | {n} | {note} |")
     w("\nCosts overlap (a leaked tool result inside a never-ending session counts in both), so do not add them up.\n")
-    for k, name, cost, n in sorted(rows, key=lambda r: -r[2]):
+    for k, label, name, group, cost, n in rows:
         items = sorted(findings.get(k, []), key=lambda i: -i["cost"])[:top]
         if items:
-            w(f"\n## {k}. {name}: largest examples")
+            w(f"\n## {label}. {name}: largest examples")
             for i in items:
                 w(f"- ${i['cost']:.2f}  {i['project']} / session {i['session']}: {i['detail']}")
     text = "\n".join(lines)
@@ -460,6 +730,7 @@ def main():
     if not findings["_sessions"]:
         print(f"no sessions found under {a.root}")
         return
+    cross_session(findings)
     report(findings, a.md, a.top)
 
 

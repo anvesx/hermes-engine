@@ -3,7 +3,8 @@
 leak_report.py - rank token-leak categories by estimated cost, from Claude Code transcripts.
 
 Categories and numbering follow the team's "Leak Categories" canvas: the 11 core leaks (1-11),
-11 additional leaks (12-22), and three breakdowns of #4 Many agents (4a-4c).
+11 additional leaks (12-22), and three breakdowns of #4 Many agents (4a-4c). The canvas's other
+109 categories (A rows) live in leak_extra.py and get a second table; --core hides it.
 
 Works on existing history: Claude Code already saves every session as JSONL under
 ~/.claude/projects/, so most leaks need no setup. The hook events from metrics_hook.py
@@ -32,6 +33,9 @@ import statistics
 import struct
 from collections import defaultdict
 from datetime import datetime, timezone
+
+import leak_extra
+from leak_extra import lid
 
 # ------------------------------------------------------------------ settings
 
@@ -230,6 +234,7 @@ class Session:
         self.prompts, self.tool_uses, self.results = [], {}, []
         self.helper_tool_uses, self.helper_results = {}, []
         self.compactions, self.summaries = [], []
+        self.interrupts, self.uuids = [], set()
         self._parse(entries)
         self._segments()
 
@@ -237,18 +242,22 @@ class Session:
     def _result(self, e, b):
         content = b.get("content")
         txt = text_of(content)
-        images = [c for c in content if isinstance(c, dict) and c.get("type") == "image"] if isinstance(content, list) else []
+        body = text_of(content, 50_000)
+        images = [(hashlib.md5(json.dumps(c.get("source", {}), sort_keys=True).encode()).hexdigest(), image_tokens(c))
+                  for c in content if isinstance(c, dict) and c.get("type") == "image"] if isinstance(content, list) else []
         return {"t": e["_t"], "id": b.get("tool_use_id"), "agent": e["_agent"],
-                "tokens": tok(text_len(content)), "image_tokens": sum(image_tokens(i) for i in images),
+                "tokens": tok(text_len(content)), "images": images, "image_tokens": sum(n for _, n in images),
                 "is_error": bool(b.get("is_error")),
                 "error": bool(b.get("is_error")) or bool(ERROR_TEXT.search(txt[:600])),
-                "text": txt}
+                "text": txt, "body": body, "hash": hashlib.md5(body.encode(errors="replace")).hexdigest()}
 
     def _parse(self, entries):
         by_id, boundaries = {}, []
         for e in entries:
             msg = e.get("message") or {}
             content = msg.get("content")
+            if not e["_helper"] and e.get("uuid"):
+                self.uuids.add(e["uuid"])
             if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
                 if not e["_helper"]:
                     boundaries.append(e["_t"])
@@ -270,6 +279,7 @@ class Session:
                     else:
                         self.calls.append(c)
                 c["usage"] = msg["usage"]
+                c["stop"] = msg.get("stop_reason") or c.get("stop")
                 if isinstance(content, list):
                     c["blocks"].extend(b for b in content if isinstance(b, dict))
             elif e.get("type") == "user":
@@ -279,8 +289,12 @@ class Session:
                             (self.helper_results if e["_helper"] else self.results).append(self._result(e, b))
                 elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
-                    if txt and "interrupted by user" not in txt:
-                        self.prompts.append({"t": e["_t"], "tokens": tok(len(txt)), "text": txt})
+                    docs = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "document") if isinstance(content, list) else 0
+                    if "interrupted by user" in txt:
+                        self.interrupts.append(e["_t"])
+                    elif txt or docs:
+                        body = text_of(content, 50_000)
+                        self.prompts.append({"t": e["_t"], "tokens": tok(len(body)), "text": txt, "body": body, "docs": docs})
         # one compaction writes a boundary marker and a summary; count boundaries when present
         self.compactions = boundaries or [t for t, _ in self.summaries]
 
@@ -411,6 +425,7 @@ def analyse(s: Session, findings):
             gap = c["t"] - prev["t"]
             if c["model"] != prev["model"]:
                 cause = "model switch"
+                add(lid(30), premium, f"~{c['cw']:,} tokens rewritten switching {prev['model']} -> {c['model']}")
             elif gap >= 3600:
                 cause = f"break of {gap / 60:.0f} min"
             elif gap >= s.ttl_s:
@@ -492,10 +507,13 @@ def analyse(s: Session, findings):
             call = r["call"]
             wasted = call["out"] * price(call["model"])[1] / 1e6 / max(1, call["n_tools"]) if call else 0.0
             add(16, wasted + s.carry(r["t"], r["tokens"]), f"{name} {kind} (~{r['tokens']:,} tokens of error text)")
+            if kind == "schema error":
+                add(lid(135), wasted + s.carry(r["t"], r["tokens"]), f"{name} rejected its arguments")
         if name == "Read" and path:
             key = (path, inp.get("offset"), inp.get("limit"))
             if key in seen_reads and path not in edited_since:
                 add(7, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
+                add(lid(72), s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
                 continue
             seen_reads[key] = r["t"]
             edited_since.discard(path)
@@ -508,6 +526,7 @@ def analyse(s: Session, findings):
         if name in ("Grep", "Glob", "Bash", "LS") and len(dep_lines) >= 5:
             dep_tokens = int(r["tokens"] * len(dep_lines) / max(1, len(r["text"].splitlines())))
             add(7, s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
+            add(lid(76), s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
         elif r["tokens"] > BIG_RESULT:
             what = os.path.basename(path) if path else (str(inp.get("command", ""))[:40] or name)
             add(17 if name == "Bash" else 7, s.carry(r["t"], r["tokens"] - BIG_KEEP),
@@ -594,7 +613,7 @@ def analyse(s: Session, findings):
 
     # inputs for the cross-session leaks (15, 22)
     edits = [r["t"] for r in results if r["name"] in EDIT_TOOLS]
-    first_edit = edits[0] if edits else float("inf")
+    s.first_edit = first_edit = edits[0] if edits else float("inf")
     s.explore, seen = [], set()
     for r in results:
         path = r["input"].get("file_path", "")
@@ -604,11 +623,13 @@ def analyse(s: Session, findings):
     first_typed = next((p["text"] for p in s.prompts if not p["text"].lstrip().startswith("<")), "")
     s.first_words = prompt_words(first_typed)
 
+    leak_extra.analyse(s, tasks, add, price)   # the canvas's "Additional categories" (A rows)
     findings["_sessions"].append(s)
 
 
 def cross_session(findings):
-    """Leaks that need several sessions of the same project: 15 and 22."""
+    """Leaks that need several sessions of the same project: 15, 22 and some A rows."""
+    leak_extra.cross_session(findings["_sessions"], lambda leak, s, cost, detail: add_finding(findings, leak, s, cost, detail))
     by_project = defaultdict(list)
     for s in findings["_sessions"]:
         by_project[s.project].append(s)
@@ -637,17 +658,24 @@ def cross_session(findings):
 # ------------------------------------------------------------------ report
 
 
-def note_for(k, findings, total, sessions):
+def unmeasurable(k, findings):
+    """Why leak k can't be costed from this data, or None. Shown instead of a misleading $0.00."""
     if k in NOT_MEASURED:
         return NOT_MEASURED[k]
+    if k == 10 and not findings["_hook_sessions"]:
+        return "unmeasurable without hook data (see #11)"
+    if k == 11:
+        return "coverage gap, not a cost: waste in uncovered sessions is unknown"
+    return None
+
+
+def note_for(k, findings, total, sessions):
     if k in PARENT:
         return f"part of #{PARENT[k]}"
     if k == 4:
         return "spend to review, not all waste"
     if k == 15:
         return "spend to review: the earlier attempt may have failed"
-    if k == 10 and not findings["_hook_sessions"]:
-        return "needs hook data"
     if k == 11:
         have = len(set(findings["_hook_sessions"]))
         return f"{have}/{len(sessions)} sessions have hook data (categories, ratings, idle detection)"
@@ -671,7 +699,34 @@ def note_for(k, findings, total, sessions):
     return ""
 
 
-def report(findings, md_path=None, top=3):
+def additional_table(findings, total, w, examples_for=10):
+    """Table of the canvas's additional categories; returns example lists for the costliest rows."""
+    rows = []
+    for n, (name, group, reason) in leak_extra.ADDITIONAL.items():
+        items = findings.get(lid(n), [])
+        rows.append((n, name, group, reason, sum(i["cost"] for i in items), items))
+    measured = [r for r in rows if not r[3] and r[0] not in leak_extra.SAME_AS]
+    w(f"\n## Additional categories\n")
+    w(f"The canvas's other {len(rows)} categories, labelled A<canvas row>: {len(measured)} measured, "
+      f"{len(leak_extra.SAME_AS)} measured by a core row, {len(rows) - len(measured) - len(leak_extra.SAME_AS)} unmeasurable.\n")
+    w("| # | Leak | Category | Est. cost | Share of spend | Instances | Note |")
+    w("|---|---|---|---|---|---|---|")
+    order = lambda r: (2 if r[3] else 1 if r[0] in leak_extra.SAME_AS else 0, -r[4], r[0])
+    for n, name, group, reason, cost, items in sorted(rows, key=order):
+        if reason:
+            w(f"| A{n} | {name} | {group} | unmeasurable | - | - | {reason} |")
+        elif n in leak_extra.SAME_AS:
+            label = LEAKS[leak_extra.SAME_AS[n]][0]
+            w(f"| A{n} | {name} | {group} | see #{label} | - | - | same measure as #{label} |")
+        else:
+            share = f"{cost / total:.1%}" if total else "-"
+            note = "spend to review, not all waste" if n in leak_extra.REVIEW else ""
+            w(f"| A{n} | {name} | {group} | ${cost:,.2f} | {share} | {len(items)} | {note} |")
+    costly = sorted((r for r in measured if r[5]), key=lambda r: -r[4])[:examples_for]
+    return [(f"A{n}", name, items) for n, name, group, reason, cost, items in costly]
+
+
+def report(findings, md_path=None, top=3, core_only=False):
     sessions = findings["_sessions"]
     total = sum(s.cost + s.helper_cost for s in sessions)
     lines = []
@@ -685,17 +740,21 @@ def report(findings, md_path=None, top=3):
     for k, (label, name, group) in LEAKS.items():
         items = findings.get(k, [])
         rows.append((k, label, name, group, sum(i["cost"] for i in items), len(items)))
-    rows.sort(key=lambda r: (r[0] in NOT_MEASURED, -r[4]))
+    rows.sort(key=lambda r: (unmeasurable(r[0], findings) is not None, -r[4]))
     for k, label, name, group, cost, n in rows:
         note = note_for(k, findings, total, sessions)
-        if k in NOT_MEASURED:
-            w(f"| {label} | {name} | {group} | - | - | - | {note} |")
+        reason = unmeasurable(k, findings)
+        if reason:
+            w(f"| {label} | {name} | {group} | unmeasurable | - | - | {'; '.join(x for x in (reason, note) if x)} |")
             continue
         share = f"{cost / total:.1%}" if total else "-"
         w(f"| {label} | {name} | {group} | ${cost:,.2f} | {share} | {n} | {note} |")
     w("\nCosts overlap (a leaked tool result inside a never-ending session counts in both), so do not add them up.\n")
-    for k, label, name, group, cost, n in rows:
-        items = sorted(findings.get(k, []), key=lambda i: -i["cost"])[:top]
+    examples = [(label, name, findings.get(k, [])) for k, label, name, group, cost, n in rows]
+    if not core_only:
+        examples += additional_table(findings, total, w)
+    for label, name, items in examples:
+        items = sorted(items, key=lambda i: -i["cost"])[:top]
         if items:
             w(f"\n## {label}. {name}: largest examples")
             for i in items:
@@ -718,6 +777,7 @@ def main():
                     help="cache lifetime: 1h on subscriptions, 5m on API keys or usage credits")
     ap.add_argument("--md", help="also write the report as Markdown")
     ap.add_argument("--top", type=int, default=3, help="examples shown per leak")
+    ap.add_argument("--core", action="store_true", help="only the core leaks, without the additional categories")
     a = ap.parse_args()
     since = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() if a.since else 0
     if a.days:
@@ -731,7 +791,7 @@ def main():
         print(f"no sessions found under {a.root}")
         return
     cross_session(findings)
-    report(findings, a.md, a.top)
+    report(findings, a.md, a.top, a.core)
 
 
 if __name__ == "__main__":

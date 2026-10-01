@@ -1,6 +1,6 @@
 # Token Leak Categories
 
-Reference for the `token-metrics:leak-report` categories: what each one catches, how it could be detected, and proposed new categories.
+Reference for the `token-metrics:leak-report` categories: what each one catches, how it is detected, and ideas not built yet.
 
 ---
 
@@ -68,15 +68,128 @@ Not in the report yet.
 |---|---|---|
 | **Memory/CLAUDE.md bloat** | Large instruction files loaded every session | Size of injected `CLAUDE.md` and memory content |
 | **Wrong working directory** | Sessions started from `~` instead of the project, so searches run across the whole home dir | Session cwd = home dir combined with broad `find`/`grep` |
-| **Whole-file reads** | Reading a full file when only a slice was needed | `Read` with no offset/limit on files over ~500 lines |
-| **Generated/vendor files** | Reading lockfiles, `.pbxproj`, minified JS, build output | Path matches |
 | **Large pastes** | Logs or code pasted straight into the prompt | User message token size |
-| **Full-page dumps** | `read_page` or `get_page_text` when a targeted `find` would do | Tool name plus result size |
 | **Figma over-fetching** | `get_design_context` on large parent frames instead of child nodes | Node size and repeated calls on the same file |
 | **Abandoned sessions** | Spend that ends with no edits, commits, or deploys | Sessions with zero write actions |
-| **Polling** | Repeatedly checking deploy, build, or CI status | Same read-only tool called N times in a row |
 
-The canvas lists about 110 more categories under the same 14 headings; see its "Additional categories" section.
+
+---
+
+## Additional categories (A rows)
+
+The canvas's "Additional categories" section, in the report's second table as A<canvas row>. 60 are measured from transcripts, 3 share a core row's measure, and 46 are unmeasurable and shown with the reason instead of $0.00. Detection logic is in `plugins/token-metrics/scripts/leak_extra.py`; A30, A72, A76 and A135 are recorded by the core detectors in `leak_report.py`.
+
+| # | Leak | Category | Status |
+|---|---|---|---|
+| A1 | Long single-thread history replay | Conversation history | Measured (spend to review) |
+| A3 | Obsolete requirements retained in context | Conversation history | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A4 | Abandoned approaches retained in context | Conversation history | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A5 | Old tool results carried into later turns | Conversation history | Measured |
+| A6 | Previous assistant answers repeatedly replayed | Conversation history | Measured (spend to review) |
+| A7 | Repeatedly pasted background information | Conversation history | Measured |
+| A8 | Full transcripts copied between chats | Conversation history | Measured |
+| A9 | Conversation forks duplicating history | Conversation history | Measured |
+| A10 | Rebuilding context after frequent fresh starts | Conversation history | Measured |
+| A14 | Overlapping directory-level instructions | Persistent instructions and memory | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A16 | Duplicate rules across instruction layers | Persistent instructions and memory | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A17 | Irrelevant always-loaded project guidance | Persistent instructions and memory | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A18 | Stale auto-memory entries | Persistent instructions and memory | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A19 | Excessive few-shot examples | Persistent instructions and memory | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A20 | Conflicting instructions causing corrective turns | Persistent instructions and memory | Unmeasurable: needs a labelled review of what was relevant or necessary (all corrections are counted in #20) |
+| A21 | Missing prompt caching where supported | Cache misses and invalidation | Measured |
+| A22 | Cold-cache requests | Cache misses and invalidation | Measured (spend to review) |
+| A24 | Prefixes below cache eligibility thresholds | Cache misses and invalidation | Measured |
+| A25 | Timestamps inside otherwise stable prefixes | Cache misses and invalidation | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A26 | Changing system-prompt content | Cache misses and invalidation | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store (counted in #3 as 'context changed') |
+| A27 | Changing loaded tool definitions | Cache misses and invalidation | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store (counted in #3 as 'context changed') |
+| A28 | Editing earlier conversation messages | Cache misses and invalidation | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A29 | Unstable tool serialization or ordering | Cache misses and invalidation | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A30 | Switching models with no reusable cache on the receiving model | Cache misses and invalidation | Measured |
+| A31 | Cache breakpoints on changing content | Cache overhead and configuration | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A32 | Stable content outside cached prefixes | Cache overhead and configuration | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A33 | Cache breakpoint lookback limits | Cache overhead and configuration | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A34 | Concurrent requests before cache creation completes | Cache overhead and configuration | Measured |
+| A35 | Cache writes never reused | Cache overhead and configuration | Measured |
+| A36 | Repeated cache warmup requests | Cache overhead and configuration | Unmeasurable: these model calls are not recorded in transcripts |
+| A37 | Cache-write pricing premiums | Cache overhead and configuration | Measured (spend to review) |
+| A38 | Thinking or effort changes invalidating cached context | Cache overhead and configuration | Unmeasurable: depends on settings or provider scope that transcripts don't record |
+| A39 | Tool-choice or web-tool configuration changes | Cache overhead and configuration | Unmeasurable: depends on settings or provider scope that transcripts don't record |
+| A40 | Cache isolation across providers or workspaces | Cache overhead and configuration | Unmeasurable: depends on settings or provider scope that transcripts don't record |
+| A42 | Excessive extended-thinking generation | Model selection and reasoning | Unmeasurable: needs matched runs with independent acceptance checks |
+| A43 | Replayed thinking blocks where preserved | Model selection and reasoning | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A44 | Repeated reasoning over unchanged evidence | Model selection and reasoning | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A45 | Replanning after every minor update | Model selection and reasoning | Measured |
+| A46 | Generating unnecessary alternative approaches | Model selection and reasoning | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A47 | Repeated self-critique cycles | Model selection and reasoning | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A48 | Model handoffs requiring context reconstruction | Model selection and reasoning | Unmeasurable: needs a labelled review of what was relevant or necessary (the cache rewrite is counted in A30) |
+| A49 | Switching models followed by duplicate task execution | Model selection and reasoning | Unmeasurable: needs matched runs with independent acceptance checks |
+| A50 | Tokenizer differences between model versions | Model selection and reasoning | Unmeasurable: needs the same payload counted on both models |
+| A52 | Repeating the user's question | Answer and artifact generation | Measured |
+| A53 | Repeating already-established explanations | Answer and artifact generation | Measured |
+| A54 | Unnecessary progress narration | Answer and artifact generation | Measured (spend to review) |
+| A55 | Excessive examples | Answer and artifact generation | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A56 | Multiple unsolicited solution variants | Answer and artifact generation | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A58 | Reprinting previously generated artifacts | Answer and artifact generation | Measured |
+| A59 | Duplicating information across output formats | Answer and artifact generation | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A60 | Truncated answers requiring regeneration | Answer and artifact generation | Measured |
+| A65 | Unnecessary tool discovery calls | Tools, MCP, skills, and plugins | Measured |
+| A66 | Large tool-call argument payloads | Tools, MCP, skills, and plugins | Measured |
+| A68 | Large invoked skill bodies | Tools, MCP, skills, and plugins | Unmeasurable: skill bodies are injected outside tool results; not identifiable in transcripts |
+| A69 | Unnecessary skill supporting-document reads | Tools, MCP, skills, and plugins | Measured (spend to review) |
+| A70 | Verbose plugin or hook context injection | Tools, MCP, skills, and plugins | Unmeasurable: needs the request payload (system prompt, tools, instructions), which transcripts don't store |
+| A71 | Whole-file reads for small relevant sections | Repository discovery and file reading | Measured |
+| A72 | Repeated reads of unchanged files | Repository discovery and file reading | Measured |
+| A73 | Broad repository searches | Repository discovery and file reading | Measured |
+| A76 | Reading dependency or vendor source | Repository discovery and file reading | Measured |
+| A77 | Reading generated files | Repository discovery and file reading | Measured |
+| A79 | Searching without useful path or symbol boundaries | Repository discovery and file reading | Measured |
+| A82 | Repeated failure tracebacks | Terminal, build, and test output | Measured |
+| A84 | Repeated linter diagnostics | Terminal, build, and test output | Measured |
+| A87 | Repeated runtime log lines | Terminal, build, and test output | Measured |
+| A91 | Large Git diffs with irrelevant context | Git, collaboration, and structured data | Measured |
+| A92 | Generated-file or lockfile diffs | Git, collaboration, and structured data | Measured |
+| A93 | Verbose commit-history metadata | Git, collaboration, and structured data | Measured |
+| A94 | Repeated working-tree status dumps | Git, collaboration, and structured data | Measured |
+| A95 | Full pull-request discussions | Git, collaboration, and structured data | Measured |
+| A96 | Full issue-tracker histories | Git, collaboration, and structured data | Measured |
+| A98 | Large JSON responses with unused fields | Git, collaboration, and structured data | Measured |
+| A99 | Database results with unnecessary rows or columns | Git, collaboration, and structured data | Measured |
+| A100 | Repetitive metadata and serialization wrappers | Git, collaboration, and structured data | Measured |
+| A101 | Full web pages instead of relevant passages | Web research and retrieval | Measured |
+| A102 | Navigation, footer, and website boilerplate | Web research and retrieval | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A103 | Excessive search-result counts | Web research and retrieval | Measured |
+| A104 | Duplicate sources containing the same information | Web research and retrieval | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A105 | Repeated fetching of unchanged pages | Web research and retrieval | Measured |
+| A107 | Overlapping retrieval chunks | Web research and retrieval | Measured |
+| A108 | Irrelevant retrieved passages | Web research and retrieval | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A109 | Entire documents attached for narrow questions | Web research and retrieval | Measured (spend to review) |
+| A110 | Repeated retrieval after losing source references | Web research and retrieval | Measured |
+| A111 | Large image payloads | Images, PDFs, and browser interaction | Measured |
+| A112 | Repeated unchanged screenshots | Images, PDFs, and browser interaction | Measured |
+| A113 | Full-screen screenshots for small relevant regions | Images, PDFs, and browser interaction | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A114 | Excessive screenshots during browser navigation | Images, PDFs, and browser interaction | Measured |
+| A115 | Multi-page PDF processing | Images, PDFs, and browser interaction | Measured (spend to review) |
+| A116 | PDF page-image processing alongside extracted text | Images, PDFs, and browser interaction | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A117 | Duplicate OCR and document-text inputs | Images, PDFs, and browser interaction | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A119 | Large image batches containing irrelevant images | Images, PDFs, and browser interaction | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A120 | Browser retries repeatedly loading the same visual context | Images, PDFs, and browser interaction | Measured |
+| A121 | Full context copied to every agent | Multi-agent workflows | Same measure as #4a |
+| A122 | Duplicate investigations across agents | Multi-agent workflows | Same measure as #4b |
+| A124 | Verbose agent task briefs | Multi-agent workflows | Measured |
+| A125 | Repeated agent startup instructions | Multi-agent workflows | Measured (spend to review) |
+| A126 | Agent-to-agent coordination chatter | Multi-agent workflows | Measured |
+| A127 | Oversized agent result reports | Multi-agent workflows | Same measure as #4c |
+| A128 | Parent agents rereading material already reviewed by workers | Multi-agent workflows | Measured |
+| A129 | Repeated review and revision rounds | Multi-agent workflows | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A130 | Agents continuing after their work is complete | Multi-agent workflows | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A131 | Ambiguous prompts causing clarification loops | Retries, automation, and context rebuilding | Measured (spend to review) |
+| A132 | Missing acceptance criteria causing rework | Retries, automation, and context rebuilding | Unmeasurable: needs a labelled review of what was relevant or necessary |
+| A134 | Regeneration after partially completed responses | Retries, automation, and context rebuilding | Measured |
+| A135 | Invalid structured outputs requiring repair | Retries, automation, and context rebuilding | Measured |
+| A136 | Repeated unchanged-state polling | Retries, automation, and context rebuilding | Measured |
+| A137 | Model-powered hooks firing excessively | Retries, automation, and context rebuilding | Unmeasurable: these model calls are not recorded in transcripts |
+| A138 | Scheduled tasks repeating unchanged analysis | Retries, automation, and context rebuilding | Unmeasurable: needs hook data plus a comparison of each run's inputs |
+| A140 | Background session-analysis model calls | Retries, automation, and context rebuilding | Unmeasurable: these model calls are not recorded in transcripts |
 
 ---
 

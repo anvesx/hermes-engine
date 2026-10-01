@@ -22,7 +22,7 @@ python3 ~/.claude/metrics/analyze.py --csv tasks.csv
 ```
 
 The scripts are copied to `~/.claude/metrics/` at the start of each session, so this path stays
-valid after plugin updates. Add `--ttl 5m` to the leak report if you use an API key or usage credits.
+valid after plugin updates. Add `--core` to skip the additional-categories table, and `--ttl 5m` to the leak report if you use an API key or usage credits.
 
 ## Privacy
 

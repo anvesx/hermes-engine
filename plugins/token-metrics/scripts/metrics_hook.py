@@ -14,11 +14,13 @@ Tag a new task by starting its prompt with a category:
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
 LOG_DIR = os.path.expanduser(os.environ.get("CC_METRICS_DIR", "~/.claude/metrics"))
 KEEP_PROMPTS = os.environ.get("CC_METRICS_KEEP_PROMPTS") == "1"   # off by default for privacy
+SYNC_EVERY_S = 60 * 60   # same throttle as share.py, checked here so most sessions spawn nothing
 
 RATE_RE = re.compile(r"^\s*rate\s+([1-5])(?:\s+(ok|partial|fail))?\s*$", re.I)
 TAG_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*)\]")
@@ -32,7 +34,7 @@ def sync_report_scripts(only_if_missing=False):
     """Copy the report scripts to ~/.claude/metrics so they run from a fixed path after updates."""
     here = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(LOG_DIR, exist_ok=True)
-    for name in ("analyze.py", "leak_report.py", "leak_extra.py", "leak_categories.py"):
+    for name in ("analyze.py", "leak_report.py", "leak_extra.py", "leak_categories.py", "stats.py", "share.py"):
         src, dst = os.path.join(here, name), os.path.join(LOG_DIR, name)
         if only_if_missing and os.path.exists(dst):
             continue
@@ -94,6 +96,25 @@ def main():
         f.write(json.dumps(rec) + "\n")
     if reply:
         print(json.dumps(reply))
+    if ev == "SessionEnd":
+        start_background_sync()
+
+
+def start_background_sync():
+    """If the user joined the leaderboard and the last sync is over an hour old, run share.py sync
+    detached, so this hook returns immediately. share.py rechecks the throttle and holds a lock."""
+    try:
+        with open(os.path.join(LOG_DIR, "share.json")) as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not cfg.get("token") or time.time() - cfg.get("last_sync", 0) < SYNC_EVERY_S:
+        return
+    script = os.path.join(LOG_DIR, "share.py")
+    if os.path.exists(script):
+        subprocess.Popen([sys.executable, script, "sync", "--background"], cwd=LOG_DIR,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
 
 
 if __name__ == "__main__":

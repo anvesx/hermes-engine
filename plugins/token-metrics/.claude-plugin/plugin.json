@@ -1,5 +1,5 @@
 {
   "name": "token-metrics",
-  "version": "1.2.0",
-  "description": "Measures Claude Code token use, latency, frustration and outcome per task, and ranks token leaks by cost. Data stays on your machine in ~/.claude/metrics."
+  "version": "1.3.0",
+  "description": "Measures Claude Code token use, latency, frustration and outcome per task, ranks token leaks by cost, and (opt-in) syncs aggregate stats to the company leaderboard. Until you join, data stays on your machine in ~/.claude/metrics."
 }

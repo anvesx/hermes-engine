@@ -781,10 +781,9 @@ def merged_items(sources, findings):
     return items + [i for cost, group in by_ref.values() for i in group]
 
 
-def curated_table(findings, total, sessions, w):
-    """The 50 categories of leak_categories.py; returns example lists for the costliest rows."""
-    w("| # | Leak | Group | Est. cost | Share of spend | Instances | Note |")
-    w("|---|---|---|---|---|---|---|")
+def curated_rows(findings, total, sessions):
+    """The 50 categories of leak_categories.py as (n, name, group, cost, items, reason, note), sorted
+    as the report shows them. reason is set when the row can't be costed from this data."""
     rows = []
     for n, (name, group, sources) in leak_categories.CATEGORIES.items():
         items = merged_items(sources, findings)
@@ -795,6 +794,14 @@ def curated_table(findings, total, sessions, w):
             note = "spend to review, not all waste"
         rows.append((n, name, group, sum(i["cost"] for i in items), items, reason, note))
     rows.sort(key=lambda r: (r[5] is not None, -r[3], r[0]))
+    return rows
+
+
+def curated_table(findings, total, sessions, w):
+    """The 50 categories of leak_categories.py; returns example lists for the costliest rows."""
+    w("| # | Leak | Group | Est. cost | Share of spend | Instances | Note |")
+    w("|---|---|---|---|---|---|---|")
+    rows = curated_rows(findings, total, sessions)
     for n, name, group, cost, items, reason, note in rows:
         if reason:
             w(f"| {n} | {name} | {group} | unmeasurable | - | - | {'; '.join(x for x in (reason, note) if x)} |")

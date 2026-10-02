@@ -1,0 +1,252 @@
+{
+ "1": {
+  "name": "Heavy starting context",
+  "group": "Starting context and setup",
+  "review": false
+ },
+ "2": {
+  "name": "Cache-write premium",
+  "group": "Prompt cache",
+  "review": true
+ },
+ "3": {
+  "name": "Cold cache at session and agent start",
+  "group": "Prompt cache",
+  "review": true
+ },
+ "4": {
+  "name": "Cache expired after a break",
+  "group": "Prompt cache",
+  "review": false
+ },
+ "5": {
+  "name": "Many agents",
+  "group": "Agents",
+  "review": true
+ },
+ "6": {
+  "name": "Long history replay",
+  "group": "Conversation history",
+  "review": true
+ },
+ "7": {
+  "name": "Interrupted turns",
+  "group": "Retries and rework",
+  "review": false
+ },
+ "8": {
+  "name": "Sessions that never end",
+  "group": "Conversation history",
+  "review": false
+ },
+ "9": {
+  "name": "No clear direction",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "10": {
+  "name": "Restarting too often",
+  "group": "Conversation history",
+  "review": false
+ },
+ "11": {
+  "name": "Stale tool results carried forward",
+  "group": "Conversation history",
+  "review": false
+ },
+ "12": {
+  "name": "Bigger model than needed",
+  "group": "Model and output",
+  "review": false
+ },
+ "13": {
+  "name": "Fork context duplication",
+  "group": "Agents",
+  "review": false
+ },
+ "14": {
+  "name": "Large tool-call arguments",
+  "group": "Tool and terminal output",
+  "review": false
+ },
+ "15": {
+  "name": "Agent startup cost",
+  "group": "Agents",
+  "review": true
+ },
+ "16": {
+  "name": "Model switch rewrote the cache",
+  "group": "Prompt cache",
+  "review": false
+ },
+ "17": {
+  "name": "Old replies replayed",
+  "group": "Conversation history",
+  "review": true
+ },
+ "18": {
+  "name": "Clarification loops",
+  "group": "Retries and rework",
+  "review": true
+ },
+ "19": {
+  "name": "Screenshot accumulation",
+  "group": "Images and browser",
+  "review": false
+ },
+ "20": {
+  "name": "Visual iteration loops",
+  "group": "Images and browser",
+  "review": false
+ },
+ "21": {
+  "name": "Cache not reused",
+  "group": "Prompt cache",
+  "review": false
+ },
+ "22": {
+  "name": "Correction churn",
+  "group": "Retries and rework",
+  "review": false
+ },
+ "23": {
+  "name": "Agents racing the cache",
+  "group": "Prompt cache",
+  "review": false
+ },
+ "24": {
+  "name": "Too much tool output",
+  "group": "Tool and terminal output",
+  "review": false
+ },
+ "25": {
+  "name": "Noisy and repeated terminal output",
+  "group": "Tool and terminal output",
+  "review": false
+ },
+ "26": {
+  "name": "Repeated tasks across sessions",
+  "group": "Conversation history",
+  "review": true
+ },
+ "27": {
+  "name": "Failed, retried and polling calls",
+  "group": "Retries and rework",
+  "review": false
+ },
+ "28": {
+  "name": "Repeated screenshots",
+  "group": "Images and browser",
+  "review": false
+ },
+ "29": {
+  "name": "Progress narration",
+  "group": "Model and output",
+  "review": true
+ },
+ "30": {
+  "name": "Whole-file reads",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "31": {
+  "name": "Duplicate reading across agents",
+  "group": "Agents",
+  "review": false
+ },
+ "32": {
+  "name": "Agent coordination chatter",
+  "group": "Agents",
+  "review": false
+ },
+ "33": {
+  "name": "Large images and PDFs",
+  "group": "Images and browser",
+  "review": false
+ },
+ "34": {
+  "name": "Broad or unbounded searches",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "35": {
+  "name": "Bloated JSON and query results",
+  "group": "Tool and terminal output",
+  "review": false
+ },
+ "36": {
+  "name": "Wordy and repeated output",
+  "group": "Model and output",
+  "review": false
+ },
+ "37": {
+  "name": "Web pages and search results",
+  "group": "Web research",
+  "review": false
+ },
+ "38": {
+  "name": "Copied history (pastes, transcripts, forks)",
+  "group": "Conversation history",
+  "review": false
+ },
+ "39": {
+  "name": "Compaction cost",
+  "group": "Conversation history",
+  "review": false
+ },
+ "40": {
+  "name": "Git and GitHub output",
+  "group": "Tool and terminal output",
+  "review": false
+ },
+ "41": {
+  "name": "Dependency, vendor and generated files",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "42": {
+  "name": "Verbose agent reports and briefs",
+  "group": "Agents",
+  "review": false
+ },
+ "43": {
+  "name": "Repeated reads of unchanged files",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "44": {
+  "name": "Re-learning the codebase",
+  "group": "Exploration and file reading",
+  "review": false
+ },
+ "45": {
+  "name": "High effort on trivial turns",
+  "group": "Model and output",
+  "review": false
+ },
+ "46": {
+  "name": "Tool and skill discovery",
+  "group": "Starting context and setup",
+  "review": false
+ },
+ "47": {
+  "name": "Usage while idle",
+  "group": "Retries and rework",
+  "review": false
+ },
+ "48": {
+  "name": "MCP tool schema bloat",
+  "group": "Starting context and setup",
+  "review": false
+ },
+ "49": {
+  "name": "Unused skills/plugins",
+  "group": "Starting context and setup",
+  "review": false
+ },
+ "50": {
+  "name": "No visibility",
+  "group": "Observability",
+  "review": false
+ }
+}

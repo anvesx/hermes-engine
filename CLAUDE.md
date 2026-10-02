@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A single Claude Code plugin, `plugins/token-metrics/`. It measures Claude Code token use per task and ranks "token leaks" by estimated cost. Everything is plain Python 3 with only the standard library. There is no build step, no dependencies, no test suite and no linter config.
+Two parts:
+- `plugins/token-metrics/` is a Claude Code plugin. It measures Claude Code token use per task and ranks "token leaks" by estimated cost. It is plain Python 3 with only the standard library: no build step, no dependencies, no test suite and no linter config.
+- `leaderboard/` is a Next.js app deployed on Vercel. Users opt in and the plugin syncs aggregate stats to it. It scores points, levels, streaks and badges, and serves the internal leaderboard, public share cards and an admin view of company-wide results.
 
 `token-leak-categories.md` at the root is the reference doc for every leak category: what it catches, how it is detected, which canvas rows it merges, and ideas not built yet. It mirrors the team's Slack "Leak Categories" canvas.
 
@@ -18,6 +20,7 @@ python3 plugins/token-metrics/scripts/leak_report.py --days 30 --all      # full
 python3 plugins/token-metrics/scripts/leak_report.py --all --core         # core leaks only
 python3 plugins/token-metrics/scripts/leak_report.py --since 2026-09-01 --ttl 5m --md out.md
 python3 plugins/token-metrics/scripts/analyze.py --since 2026-10-01 --csv tasks.csv
+python3 plugins/token-metrics/scripts/stats.py [--json]                  # "Wrapped" summary, or the exact sync payload
 ```
 
 `--ttl 5m` is for API-key and usage-credit users (5-minute cache, 1.25x write cost). The default `1h` is for subscriptions (2x write cost). `--root` and `--events` override the input paths.
@@ -26,6 +29,16 @@ To test the hook, pipe a hook payload into it. Set `CC_METRICS_DIR` so it writes
 
 ```bash
 echo '{"hook_event_name":"UserPromptSubmit","session_id":"x","prompt":"rate 3 ok"}' | CC_METRICS_DIR=/tmp/m python3 plugins/token-metrics/scripts/metrics_hook.py
+```
+
+To work on the leaderboard locally, use Postgres and point the plugin at the dev server. Without `RESEND_API_KEY`, sign-in codes are printed to the server log:
+
+```bash
+cd leaderboard && npm install
+DATABASE_URL=postgres://localhost/token_metrics npm run db:init        # applies db/schema.sql (idempotent)
+DATABASE_URL=... ADMIN_EMAILS=you@devxlabs.ai npm run dev
+CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins/token-metrics/scripts/share.py join you@devxlabs.ai
+npm run typecheck && npm run build
 ```
 
 ## Architecture
@@ -38,7 +51,7 @@ echo '{"hook_event_name":"UserPromptSubmit","session_id":"x","prompt":"rate 3 ok
 
 Prompt text is not stored unless `CC_METRICS_KEEP_PROMPTS=1`.
 
-**Script sync.** On SessionStart, the hook copies `analyze.py`, `leak_report.py`, `leak_extra.py` and `leak_categories.py` into `~/.claude/metrics/`. On other events it only copies them if they are missing. The slash commands in `commands/*.md` run the copies from that fixed path, and fall back to `find`-ing them under `~/.claude/plugins`. This means:
+**Script sync.** On SessionStart, the hook copies the scripts listed in `sync_report_scripts()` into `~/.claude/metrics/`. On other events it only copies them if they are missing. The slash commands in `commands/*.md` run the copies from that fixed path, and fall back to `find`-ing them under `~/.claude/plugins`. This means:
 - The report scripts must work standalone from a flat directory, importing each other as siblings (`import leak_extra`).
 - A new report module has to be added to the list in `sync_report_scripts()`.
 
@@ -52,6 +65,23 @@ Detectors call `add_finding(...)` / `add(...)`:
 - `overlap=True` keeps a finding for `--all` but leaves it out of the curated rows.
 - Keys starting with `_` in `findings` (`_sessions`, `_prefix_sizes`, …) hold aggregate stats used in notes. They are not leaks.
 
+**Leaderboard sync.**
+- `stats.py` runs the leak detectors once over all history, then splits the results into per-ISO-week buckets using local time:
+  - Tokens, spend, active hours and active days go to the week each call happened in.
+  - Session and task counts, and the leak shares, go to the week the session started in.
+- `share.py` holds the user's token in `share.json` (mode 0600). It sends `stats.py`'s payload to `POST /api/sync`.
+- On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
+- The payload must never contain prompt text, project names, file paths or session ids.
+
+**Leaderboard backend (`leaderboard/`).**
+- `lib/validate.ts` keeps only whitelisted, range-checked fields from each payload, because clients report their own numbers. `weekly_stats` stores one row per user and week, replaced on each sync.
+- Scoring happens on read, in `lib/score.ts`. `lib/board.ts` scores every player in memory on each request, which is fine at company size. Points:
+  - Participation, earned only from the user's join week onward.
+  - Improvement against the user's own baseline `waste_index`, taken from their first two weeks with 3+ active days. Usually that's history synced when they joined.
+- Volume (tokens, spend, hours) earns cosmetic badges but never points.
+- Auth works by email code. `/api/auth/verify` issues a token per sign-in; CLI tokens go in the Bearer header, web tokens in the `tm_session` cookie. Only SHA-256 hashes of tokens and codes are stored.
+- Public pages are `/u/[handle]` and `/u/[handle]/card.png`, which renders with `next/og`. They show only the fields enabled in the user's `card_fields`. Everything else requires sign-in. `/admin` is limited to `ADMIN_EMAILS`.
+
 **Cost model.** Per-call token counts come from transcript `usage` and are exact. The size of individual items is estimated at 4 chars/token; images use their pixel dimensions. A leaked item is charged at the cache-read price on every later call that re-reads it, until the next compaction. Prices are API list prices.
 
 ## Keeping things in sync
@@ -59,7 +89,10 @@ Detectors call `add_finding(...)` / `add(...)`:
 - Some definitions are copied, not shared, because each script must run alone:
   - `PRICES` appears in both `leak_report.py` and `analyze.py`.
   - `CORRECTION_RE` and `TAG_RE` appear in both `metrics_hook.py` and `leak_report.py`.
+  - `SYNC_EVERY_S` appears in both `metrics_hook.py` and `share.py`.
+  - The payload schema is built by `stats.py` and validated by `leaderboard/lib/validate.ts`. Bump `SCHEMA` in both for breaking changes.
+  - `leaderboard/lib/categories.json` is generated from `leak_categories.py`. Run `npm run categories` after changing categories.
   
   Change every copy together.
 - When you add, rename or merge a leak or category, update `token-leak-categories.md` to match. Commits so far also bump `version` in `.claude-plugin/plugin.json` and update `plugins/token-metrics/README.md` when the user-facing behaviour changes.
-- `scripts/__pycache__/` is committed by accident (there is no `.gitignore`). Don't add new `.pyc` changes to commits.
+- `.gitignore` at the root covers Python caches, `.claude/settings.local.json` and report output. `leaderboard/.gitignore` covers the Node build output.

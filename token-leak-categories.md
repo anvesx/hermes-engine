@@ -2,34 +2,104 @@
 
 Reference for the `token-metrics:leak-report` categories: what each one catches, how it is detected, and ideas not built yet.
 
+By default the report shows **50 categories** in 11 groups, numbered 1-50. They are built from the team's [Leak Categories canvas](https://devxconsultancy.slack.com/docs/T046R1BS75M/F0C61Q25V5J): each one sums one or more canvas detectors (the "Canvas rows" column). Rows that cost nothing in practice, measured the same thing twice, or can't be measured from transcripts were folded in or dropped; the full canvas list is still printed with `--all` and documented further down. The list lives in `plugins/token-metrics/scripts/leak_categories.py`.
+
+When a category merges several detectors and two of them flag the same tool result (for example one `git diff` that is both large and full of lockfile changes), that result counts once, at the larger cost.
+
 ---
 
-## Current report snapshot (2026-09-01 to 2026-10-01)
+## The 50 categories
 
-156 sessions, API-equivalent spend **$1,609.63**. Taken before the categories were updated; rows renumbered to the canvas numbering.
+Numbers were assigned by cost for 2026-09-01 to 2026-10-01 and stay fixed; the report still sorts by cost on every run. "Review" means spend to look at, not all waste.
 
-| # | Leak | Est. cost | Share of spend | Instances | Note |
-|---|---|---|---|---|---|
-| 1 | Heavy starting context | $413.49 | 25.7% | 149 | median starting context ~162,239 tokens |
-| 3 | Losing the cache | $208.94 | 13.0% | 83 | included compaction rewrites, now #19 |
-| 4 | Many agents | $172.02 | 10.7% | 26 | spend to review, not all waste |
-| 2 | Sessions that never end | $118.09 | 7.3% | 71 | 4 compactions (double counted then, now fixed) |
-| 5 | No clear direction | $90.83 | 5.6% | 37 |  |
-| 6 | Bigger model than needed | $56.72 | 3.5% | 1457 |  |
-| 7 | Too much tool output | $7.61 | 0.5% | 134 | included shell output and agent reports, now #17 and #4c |
-| 8 | Wordy responses | $0.18 | 0.0% | 4 | all output is 8.5% of spend |
-| 9 | Retry loops | $0.00 | 0.0% | 0 |  |
-| 10 | Usage while idle | $0.00 | 0.0% | 0 |  |
-| 11 | No visibility | $0.00 | 0.0% | 0 | 1/156 sessions have hook data |
+| # | Leak | Group | What it catches | Canvas rows |
+|---|---|---|---|---|
+| 1 | **Heavy starting context** | Starting context and setup | First call already carries a large prompt (system prompt, tools, memory, CLAUDE.md), repeated on every call | #1 |
+| 2 | **Cache-write premium** (review) | Prompt cache | The extra paid for cache writes over the normal input price | A37 |
+| 3 | **Cold cache at session and agent start** (review) | Prompt cache | The first cache write of each session and helper agent | A22 |
+| 4 | **Cache expired after a break** | Prompt cache | A break long enough for the cache to expire, so the whole context is rewritten | #3 |
+| 5 | **Many agents** (review) | Agents | Heavy use of subagents, each with its own context and calls | #4 |
+| 6 | **Long history replay** (review) | Conversation history | Calls carrying more than 100k tokens of conversation history | A1 |
+| 7 | **Interrupted turns** | Retries and rework | Turns stopped before they finished, whose work is then redone | A134 |
+| 8 | **Sessions that never end** | Conversation history | A new task in an old session, carrying all the old context | #2 |
+| 9 | **No clear direction** | Exploration and file reading | More than 15 reads/searches before the first edit | #5 |
+| 10 | **Restarting too often** | Conversation history | A new session soon after the last one, rebuilding the same context | A10 |
+| 11 | **Stale tool results carried forward** | Conversation history | Tool results still re-read 30+ calls later | A5 |
+| 12 | **Bigger model than needed** | Model and output | Opus/Fable on simple tasks and helper agents | #6 |
+| 13 | **Fork context duplication** | Agents | Helper agents that start with the parent's full context | #4a (= A121) |
+| 14 | **Large tool-call arguments** | Tool and terminal output | Tool calls with 1k+ tokens of arguments (e.g. long plans) | A66 |
+| 15 | **Agent startup cost** (review) | Agents | The startup call of every helper agent | A125 |
+| 16 | **Model switch rewrote the cache** | Prompt cache | Switching models, so the new model writes the context from scratch | A30 |
+| 17 | **Old replies replayed** (review) | Conversation history | Earlier assistant text re-read on every later call | A6 |
+| 18 | **Clarification loops** (review) | Retries and rework | Turns spent asking clarifying questions | A131 |
+| 19 | **Screenshot accumulation** | Images and browser | Screenshots that stay in context until compaction | #14 |
+| 20 | **Visual iteration loops** | Images and browser | More than 3 edit -> screenshot cycles in one task | #21 |
+| 21 | **Cache not reused** | Prompt cache | Cache writes never read back, uncached calls, prefixes too short to cache | A35, A21, A24 |
+| 22 | **Correction churn** | Retries and rework | Work done in turns that start with "no", "that's wrong", "revert" | #20 |
+| 23 | **Agents racing the cache** | Prompt cache | Helper agents writing the same cache at the same moment | A34 |
+| 24 | **Too much tool output** | Tool and terminal output | Non-shell tool results above 4k tokens (re-reads and dependency hits are in 43 and 41) | #7 |
+| 25 | **Noisy and repeated terminal output** | Tool and terminal output | Shell output above 4k tokens, repeated log lines, repeated tracebacks and lint output | #17, A87, A82, A84 |
+| 26 | **Repeated tasks across sessions** (review) | Conversation history | The same first request in an earlier session of the project | #15 |
+| 27 | **Failed, retried and polling calls** | Retries and rework | Errors and denials, the same failing call repeated, the same call returning the same result | #16, #9, A136 (A135 is part of #16) |
+| 28 | **Repeated screenshots** | Images and browser | Back-to-back screenshots, unchanged screenshots, screenshots retaken after a failed browser action | A114, A112, A120 |
+| 29 | **Progress narration** (review) | Model and output | More than 50 tokens of text around each tool call | A54 |
+| 30 | **Whole-file reads** | Exploration and file reading | Unsliced reads of files above 5k tokens | A71 |
+| 31 | **Duplicate reading across agents** | Agents | Files read by a sibling agent, or re-read by the parent after a helper read them | #4b (= A122), A128 |
+| 32 | **Agent coordination chatter** | Agents | Messages sent between agents | A126 |
+| 33 | **Large images and PDFs** | Images and browser | Oversized images and PDFs read into context | A111, A115 |
+| 34 | **Broad or unbounded searches** | Exploration and file reading | Searches returning 100+ lines or with no path/type limit | A73, A79 |
+| 35 | **Bloated JSON and query results** | Tool and terminal output | Large JSON and database results, results that are mostly keys and wrappers | A98, A99, A100 |
+| 36 | **Wordy and repeated output** | Model and output | Whole-file rewrites, restating the request, repeated explanations or code, truncated replies | #8, A52, A53, A58, A60 |
+| 37 | **Web pages and search results** | Web research | Full pages, attached documents, too many search results, repeated fetches and passages | A101, A109, A103, A105, A107, A110 |
+| 38 | **Copied history (pastes, transcripts, forks)** | Conversation history | Background pasted again, chat transcripts pasted in, forked conversations | A7, A8, A9 |
+| 39 | **Compaction cost** | Conversation history | Writing the summary and re-reading after it | #19 |
+| 40 | **Git and GitHub output** | Tool and terminal output | Large diffs, lockfile diffs, verbose logs, repeated status, PR and issue histories | A91-A96 |
+| 41 | **Dependency, vendor and generated files** | Exploration and file reading | Reads and search hits in `node_modules`, build output, lockfiles and generated code | A76, A77 |
+| 42 | **Verbose agent reports and briefs** | Agents | Agent results above 2.5k tokens and briefs above 1k | #4c (= A127), A124 |
+| 43 | **Repeated reads of unchanged files** | Exploration and file reading | The same file read again without an edit in between | A72 |
+| 44 | **Re-learning the codebase** | Exploration and file reading | Files that 2+ earlier sessions also explored before their first edit | #22 |
+| 45 | **High effort on trivial turns** | Model and output | Long thinking behind a short reply with no tool calls | #18 |
+| 46 | **Tool and skill discovery** | Starting context and setup | Repeated tool-search calls and reads of skill supporting documents | A65, A69 |
+| 47 | **Usage while idle** | Retries and rework | Turns that started without a typed prompt (needs hook data) | #10 |
+| 48 | **MCP tool schema bloat** | Starting context and setup | Tool definitions sent on every call; unmeasurable, part of 1 | #12 |
+| 49 | **Unused skills/plugins** | Starting context and setup | Skill listings injected but never used; unmeasurable, part of 1 | #13 |
+| 50 | **No visibility** | Observability | Sessions without hook data, so categories, ratings and idle time are unknown | #11 |
+
+Only shown with `--all`: A45 (replanning, never triggered) and the ~46 canvas rows that can't be measured from transcripts.
+
+---
+
+## Current report snapshot (2026-09-01 to 2026-10-02)
+
+159 sessions, API-equivalent spend **$1,655.24**. Top 15 of the 50:
+
+| # | Leak | Est. cost | Share of spend |
+|---|---|---|---|
+| 1 | Heavy starting context | $424.09 | 25.6% |
+| 2 | Cache-write premium | $322.45 | 19.5% |
+| 3 | Cold cache at session and agent start | $238.74 | 14.4% |
+| 4 | Cache expired after a break | $215.47 | 13.0% |
+| 6 | Long history replay | $175.04 | 10.6% |
+| 5 | Many agents | $173.66 | 10.5% |
+| 7 | Interrupted turns | $160.53 | 9.7% |
+| 8 | Sessions that never end | $122.30 | 7.4% |
+| 9 | No clear direction | $90.12 | 5.4% |
+| 10 | Restarting too often | $82.14 | 5.0% |
+| 11 | Stale tool results carried forward | $66.98 | 4.0% |
+| 12 | Bigger model than needed | $57.41 | 3.5% |
+| 13 | Fork context duplication | $34.58 | 2.1% |
+| 14 | Large tool-call arguments | $27.28 | 1.6% |
+| 15 | Agent startup cost | $23.83 | 1.4% |
 
 Costs overlap, so they don't add up to the total.
 
 ---
 
-## Categories in the report
+## Full canvas list (`--all`)
 
-Numbering and categories follow the team's [Leak Categories canvas](https://devxconsultancy.slack.com/docs/T046R1BS75M/F0C61Q25V5J): 1-11 are the core leaks, 12-22 the additional ones, and 4a-4c break down #4.
+`--all` prints the canvas numbering instead: 1-11 are the core leaks, 12-22 the additional ones, 4a-4c break down #4, and the A rows follow in a second table (`--all --core` hides it). The tables below give the detection signal for each canvas row.
 
+### Core rows
 | # | Leak | Category | What it catches | Detection signal |
 |---|---|---|---|---|
 | 1 | **Heavy starting context** | Persistent instructions and memory | Sessions whose very first call already carries a large prompt: system prompt, tool definitions, memory, CLAUDE.md. That cost repeats on every call. | First-request context above 10k tokens, re-read on every call |
@@ -60,7 +130,7 @@ Numbering and categories follow the team's [Leak Categories canvas](https://devx
 
 ---
 
-## Still proposed
+### Still proposed
 
 Not in the report yet.
 
@@ -75,7 +145,7 @@ Not in the report yet.
 
 ---
 
-## Additional categories (A rows)
+### Additional categories (A rows)
 
 The canvas's "Additional categories" section, in the report's second table as A<canvas row>. 60 are measured from transcripts, 3 share a core row's measure, and 46 are unmeasurable and shown with the reason instead of $0.00. Detection logic is in `plugins/token-metrics/scripts/leak_extra.py`; A30, A72, A76 and A135 are recorded by the core detectors in `leak_report.py`.
 
@@ -195,14 +265,14 @@ The canvas's "Additional categories" section, in the report's second table as A<
 
 ## Open questions
 
-- **#6 Bigger model than needed**: no good measure yet of the real problem (people on higher plans never switch to a cheaper model). The report now shows the share of main-session spend on Opus/Fable as a first signal.
-- **#12 and #13** need the list of loaded tools and skills, which transcripts don't contain.
+- **12 Bigger model than needed**: no good measure yet of the real problem (people on higher plans never switch to a cheaper model). The report now shows the share of main-session spend on Opus/Fable as a first signal.
+- **48 and 49** need the list of loaded tools and skills, which transcripts don't contain.
 
 ---
 
 ## Where to start
 
-1. **MCP schema bloat** and **wrong working directory**: probably a large part of the $413 "Heavy starting context" row. Disconnecting rarely used MCP servers could cut every call.
+1. **MCP schema bloat** and **wrong working directory**: probably a large part of the $424 "Heavy starting context" row (1). Disconnecting rarely used MCP servers could cut every call.
 2. **Screenshot accumulation** and **Figma over-fetching**: the mobile/Figma sessions (BIT-landers-nsf-mobile) appear at the top of several leak rows.
-3. **Fork context duplication**: multiplies the starting-context problem inside the $172 "Many agents" row.
-4. **Enable hooks (#11)**: unlocks idle detection and per-session categorization.
+3. **Fork context duplication**: multiplies the starting-context problem inside the $174 "Many agents" row (5, 13).
+4. **Enable hooks (50)**: unlocks idle detection and per-session categorization.

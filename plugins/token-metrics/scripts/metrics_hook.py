@@ -32,7 +32,7 @@ def sync_report_scripts(only_if_missing=False):
     """Copy the report scripts to ~/.claude/metrics so they run from a fixed path after updates."""
     here = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(LOG_DIR, exist_ok=True)
-    for name in ("analyze.py", "leak_report.py", "leak_extra.py"):
+    for name in ("analyze.py", "leak_report.py", "leak_extra.py", "leak_categories.py"):
         src, dst = os.path.join(here, name), os.path.join(LOG_DIR, name)
         if only_if_missing and os.path.exists(dst):
             continue

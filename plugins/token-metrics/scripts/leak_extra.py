@@ -372,6 +372,7 @@ def analyse(s, tasks, add, price):
         if r["name"] == "Read" and path:
             helper_reads.setdefault(path, r["t"])
     prev = None
+    radd = lambda leak, cost, detail: add(leak, cost, detail, ref=r["id"])   # per-result findings
     for r in results:
         name, inp, call = r["name"] or "", r["input"], r["call"]
         body, tokens = r["body"], r["tokens"]
@@ -383,89 +384,89 @@ def analyse(s, tasks, add, price):
         if name in DISCOVERY_TOOLS:                                   # A65
             discovery += 1
             if discovery > DISCOVERY_LIMIT:
-                add(lid(65), tool_share(call) + s.carry(r["t"], tokens), f"{name} call {discovery} in one session")
+                radd(lid(65), tool_share(call) + s.carry(r["t"], tokens), f"{name} call {discovery} in one session")
         args = tok(len(json.dumps(inp)))
         if name not in EDIT_TOOLS | AGENT_TOOLS and args > ARGS_BIG:   # A66
-            add(lid(66), out_cost(call, args) + s.carry(r["t"], args) if call else 0.0, f"{name} called with ~{args:,} tokens of arguments")
+            radd(lid(66), out_cost(call, args) + s.carry(r["t"], args) if call else 0.0, f"{name} called with ~{args:,} tokens of arguments")
         if path:
             if "/skills/" in path and not path.endswith("SKILL.md"):  # A69
-                add(lid(69), s.carry(r["t"], tokens), f"read skill document {path.rsplit('/', 1)[-1]}")
+                radd(lid(69), s.carry(r["t"], tokens), f"read skill document {path.rsplit('/', 1)[-1]}")
             if not sliced and tokens > WHOLE_FILE:                    # A71
-                add(lid(71), s.carry(r["t"], tokens - KEEP), f"whole-file read of {path.rsplit('/', 1)[-1]} (~{tokens:,} tokens)")
+                radd(lid(71), s.carry(r["t"], tokens - KEEP), f"whole-file read of {path.rsplit('/', 1)[-1]} (~{tokens:,} tokens)")
             if DEP_DIRS.search(path):                                 # A76
-                add(lid(76), s.carry(r["t"], tokens), f"read dependency file {path.rsplit('/', 1)[-1]}")
+                radd(lid(76), s.carry(r["t"], tokens), f"read dependency file {path.rsplit('/', 1)[-1]}")
             elif GENERATED.search(path):                              # A77
-                add(lid(77), s.carry(r["t"], tokens), f"read generated file {path.rsplit('/', 1)[-1]}")
+                radd(lid(77), s.carry(r["t"], tokens), f"read generated file {path.rsplit('/', 1)[-1]}")
             if path.lower().endswith(".pdf"):                         # A115
-                add(lid(115), s.carry(r["t"], tokens + r["image_tokens"]), f"read PDF {path.rsplit('/', 1)[-1]}")
+                radd(lid(115), s.carry(r["t"], tokens + r["image_tokens"]), f"read PDF {path.rsplit('/', 1)[-1]}")
             if path in helper_reads and helper_reads[path] < r["t"]:  # A128
-                add(lid(128), s.carry(r["t"], tokens), f"re-read {path.rsplit('/', 1)[-1]} after a helper agent read it")
+                radd(lid(128), s.carry(r["t"], tokens), f"re-read {path.rsplit('/', 1)[-1]} after a helper agent read it")
         if name in ("Grep", "Glob") or SEARCH_CMD.search(cmd):
             if len(lines) > SEARCH_LINES:                             # A73
-                add(lid(73), s.carry(r["t"], int(tokens * (1 - SEARCH_LINES / len(lines)))),
+                radd(lid(73), s.carry(r["t"], int(tokens * (1 - SEARCH_LINES / len(lines)))),
                     f"{name} returned {len(lines)} lines")
             bounded = inp.get("path") or inp.get("glob") or inp.get("type") or name == "Bash"
             if name == "Glob":
                 bounded = inp.get("path") or not str(inp.get("pattern", "")).startswith("**")
             if not bounded and tokens > 1_000:                        # A79
-                add(lid(79), s.carry(r["t"], tokens - 1_000), f"{name} with no path or file-type limit (~{tokens:,} tokens)")
+                radd(lid(79), s.carry(r["t"], tokens - 1_000), f"{name} with no path or file-type limit (~{tokens:,} tokens)")
         if r["error"] and TRACEBACK.search(body):                     # A82
             key = md5("\n".join(norm_lines(body)[-5:]))
             if key in seen["trace"]:
-                add(lid(82), s.carry(r["t"], tokens), f"same traceback again (~{tokens:,} tokens)")
+                radd(lid(82), s.carry(r["t"], tokens), f"same traceback again (~{tokens:,} tokens)")
             seen["trace"].add(key)
         if LINT_CMD.search(cmd):                                      # A84
             key = (cmd.strip(), r["hash"])
             if key in seen["lint"]:
-                add(lid(84), s.carry(r["t"], tokens), f"unchanged lint output ({cmd[:40]})")
+                radd(lid(84), s.carry(r["t"], tokens), f"unchanged lint output ({cmd[:40]})")
             seen["lint"].add(key)
         if tokens >= 1_000 and (name != "Read" or path.endswith(".log")):  # A87
             nl = norm_lines(body)
             dup = 1 - len(set(nl)) / len(nl) if len(nl) >= 20 else 0
             if dup > DUP_LINE_SHARE:
-                add(lid(87), s.carry(r["t"], int(tokens * dup)), f"{name} output {dup:.0%} repeated lines")
+                radd(lid(87), s.carry(r["t"], int(tokens * dup)), f"{name} output {dup:.0%} repeated lines")
         if DIFF_CMD.search(cmd):
             if tokens > BIG:                                          # A91
-                add(lid(91), s.carry(r["t"], tokens - KEEP), f"git diff ~{tokens:,} tokens")
+                radd(lid(91), s.carry(r["t"], tokens - KEEP), f"git diff ~{tokens:,} tokens")
             gen = sum(len(sec) for sec in re.split(r"(?=^diff --git )", body, flags=re.M)
                       if re.match(r"diff --git a/(\S+)", sec) and GENERATED.search(re.match(r"diff --git a/(\S+)", sec).group(1)))
             if tok(gen) > 500:                                        # A92
-                add(lid(92), s.carry(r["t"], tok(gen)), f"~{tok(gen):,} tokens of lockfile/generated diff")
+                radd(lid(92), s.carry(r["t"], tok(gen)), f"~{tok(gen):,} tokens of lockfile/generated diff")
         if LOG_CMD.search(cmd) and not LOG_SHORT.search(cmd):         # A93
             meta = sum(len(l) for l in lines if re.match(r"(commit [0-9a-f]{7,}|Author:|Date:|Merge:)", l))
             if tok(meta) > 300:
-                add(lid(93), s.carry(r["t"], tok(meta)), f"~{tok(meta):,} tokens of commit metadata")
+                radd(lid(93), s.carry(r["t"], tok(meta)), f"~{tok(meta):,} tokens of commit metadata")
         if STATUS_CMD.search(cmd):                                    # A94
             if seen["status"] == r["hash"]:
-                add(lid(94), s.carry(r["t"], tokens), "unchanged git status")
+                radd(lid(94), s.carry(r["t"], tokens), "unchanged git status")
             seen["status"] = r["hash"]
         if tokens > BIG:
             if PR_CMD.search(cmd) or "pull_request" in name:          # A95
-                add(lid(95), s.carry(r["t"], tokens - KEEP), f"PR discussion ~{tokens:,} tokens")
+                radd(lid(95), s.carry(r["t"], tokens - KEEP), f"PR discussion ~{tokens:,} tokens")
             if ISSUE_CMD.search(cmd) or any(k in name.lower() for k in ("issue", "jira", "linear", "asana", "clickup")):  # A96
-                add(lid(96), s.carry(r["t"], tokens - KEEP), f"issue history ~{tokens:,} tokens ({name})")
+                radd(lid(96), s.carry(r["t"], tokens - KEEP), f"issue history ~{tokens:,} tokens ({name})")
             if DB_CMD.search(cmd) or any(k in name.lower() for k in ("query", "sql")):  # A99
-                add(lid(99), s.carry(r["t"], tokens - KEEP), f"query result ~{tokens:,} tokens ({name})")
+                radd(lid(99), s.carry(r["t"], tokens - KEEP), f"query result ~{tokens:,} tokens ({name})")
             if name != "Read" and body.lstrip()[:1] in "{[" and body.strip():        # A98
-                add(lid(98), s.carry(r["t"], tokens - KEEP), f"JSON result ~{tokens:,} tokens ({name})")
+                radd(lid(98), s.carry(r["t"], tokens - KEEP), f"JSON result ~{tokens:,} tokens ({name})")
             if is_page_tool(name):                                    # A101
-                add(lid(101), s.carry(r["t"], tokens - KEEP), f"full page ~{tokens:,} tokens ({name})")
+                radd(lid(101), s.carry(r["t"], tokens - KEEP), f"full page ~{tokens:,} tokens ({name})")
         if tokens > 2_000 and name != "Read" and body.lstrip()[:1] in "{[":   # A100
             try:
                 wrapper = len(body) - json_leaf_chars(json.loads(body))
             except ValueError:
                 wrapper = 0
             if wrapper > 0.5 * len(body):
-                add(lid(100), s.carry(r["t"], tok(int(wrapper - 0.5 * len(body)))), f"JSON keys and wrappers {wrapper / len(body):.0%} of {name} result")
+                radd(lid(100), s.carry(r["t"], tok(int(wrapper - 0.5 * len(body)))), f"JSON keys and wrappers {wrapper / len(body):.0%} of {name} result")
         if is_web_search(name):                                       # A103
             urls = len(set(URL_RE.findall(body)))
             if urls > SEARCH_RESULTS:
-                add(lid(103), s.carry(r["t"], int(tokens * (1 - SEARCH_RESULTS / urls))), f"{urls} search results")
+                radd(lid(103), s.carry(r["t"], int(tokens * (1 - SEARCH_RESULTS / urls))), f"{urls} search results")
         url = inp.get("url") if (is_page_tool(name) or "navigate" in name) else None
         if url:                                                       # A105, A110
             if url in fetched:
                 lost = any(fetched[url] < x < r["t"] for x in s.comp_sorted)
-                add(lid(110) if lost else lid(105), tool_share(call) + s.carry(r["t"], tokens),
+                radd(lid(110) if lost else lid(105), tool_share(call) + s.carry(r["t"], tokens),
                     f"fetched {url[:60]} again" + (" after a compaction" if lost else ""))
             fetched[url] = r["t"]
         if name not in ("Read", "Bash") and any(k in name.lower() for k in ("search", "retriev", "docs")):  # A107
@@ -477,25 +478,25 @@ def analyse(s, tasks, add, price):
                         dup += len(l)
                     seen["line"].setdefault(h, r["id"])
             if tok(dup) > 200:
-                add(lid(107), s.carry(r["t"], tok(dup)), f"~{tok(dup):,} tokens of passages already retrieved")
+                radd(lid(107), s.carry(r["t"], tok(dup)), f"~{tok(dup):,} tokens of passages already retrieved")
         for h, itok in r["images"]:                                   # A111, A112, A120
             if itok > IMAGE_BIG:
-                add(lid(111), (itok - IMAGE_KEEP) * price(call["model"])[0] / 1e6 if call else 0.0, f"image ~{itok:,} tokens")
+                radd(lid(111), (itok - IMAGE_KEEP) * price(call["model"])[0] / 1e6 if call else 0.0, f"image ~{itok:,} tokens")
             if h in seen["image"]:
                 retry = any(x["error"] and seen["image"][h] < x["t"] < r["t"] and is_browser_tool(x["name"] or "")
                             for x in results)
-                add(lid(120) if retry else lid(112), s.carry(r["t"], itok),
+                radd(lid(120) if retry else lid(112), s.carry(r["t"], itok),
                     "same screenshot again" + (" after a failed browser action" if retry else ""))
             seen["image"][h] = r["t"]
         if r["images"] and prev is not None and prev["images"]:      # A114
-            add(lid(114), s.carry(r["t"], r["image_tokens"]), "screenshot taken right after another screenshot")
+            radd(lid(114), s.carry(r["t"], r["image_tokens"]), "screenshot taken right after another screenshot")
         counted_elsewhere = {"Read"} | EDIT_TOOLS | AGENT_TOOLS | PLAN_TOOLS | DISCOVERY_TOOLS   # 7, A45, A65
         if (not r["error"] and call and name not in counted_elsewhere and not r["images"]
                 and not LINT_CMD.search(cmd) and not STATUS_CMD.search(cmd)):   # A136
             key = (name, md5(json.dumps(inp, sort_keys=True)), r["hash"])
             polls[key] += 1
             if polls[key] >= POLL_MIN:
-                add(lid(136), tool_share(call) + s.carry(r["t"], tokens), f"{name} returned the same result {polls[key]} times")
+                radd(lid(136), tool_share(call) + s.carry(r["t"], tokens), f"{name} returned the same result {polls[key]} times")
         prev = r
 
     # A124 Verbose agent task briefs, A125 repeated agent startup, A126 coordination chatter,

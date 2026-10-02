@@ -2,9 +2,10 @@
 """
 leak_report.py - rank token-leak categories by estimated cost, from Claude Code transcripts.
 
-Categories and numbering follow the team's "Leak Categories" canvas: the 11 core leaks (1-11),
-11 additional leaks (12-22), and three breakdowns of #4 Many agents (4a-4c). The canvas's other
-109 categories (A rows) live in leak_extra.py and get a second table; --core hides it.
+By default the report shows 50 curated categories (leak_categories.py), each summing one or more
+detectors. --all prints the full canvas list instead: the 11 core leaks (1-11), 11 additional
+leaks (12-22), three breakdowns of #4 Many agents (4a-4c), and the canvas's other 109 categories
+(A rows, detected in leak_extra.py) in a second table; --all --core hides that second table.
 
 Works on existing history: Claude Code already saves every session as JSONL under
 ~/.claude/projects/, so most leaks need no setup. The hook events from metrics_hook.py
@@ -34,6 +35,7 @@ import struct
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import leak_categories
 import leak_extra
 from leak_extra import lid
 
@@ -371,8 +373,11 @@ class Session:
 # ------------------------------------------------------------------ leak detectors
 
 
-def add_finding(findings, leak, s, cost, detail):
-    findings[leak].append({"cost": cost, "session": s.sid[:8], "project": s.project, "detail": detail})
+def add_finding(findings, leak, s, cost, detail, ref=None, overlap=False):
+    """ref: the tool result a finding is about, so a curated row merging two detectors counts it once.
+    overlap: also recorded under another leak; kept for --all, skipped in the curated rows."""
+    findings[leak].append({"cost": cost, "session": s.sid[:8], "project": s.project, "detail": detail,
+                           "ref": ref and f"{s.sid}:{ref}", "overlap": overlap})
 
 
 def analyse(s: Session, findings):
@@ -384,8 +389,8 @@ def analyse(s: Session, findings):
     prefix = max(0, first["ctx"] - first_prompt)
     results = sorted(s.results, key=lambda r: r["t"])
 
-    def add(leak, cost, detail):
-        add_finding(findings, leak, s, cost, detail)
+    def add(leak, cost, detail, ref=None, overlap=False):
+        add_finding(findings, leak, s, cost, detail, ref, overlap)
 
     # 1. Heavy starting context: excess over the baseline, re-read on every call
     findings["_prefix_sizes"].append(prefix)
@@ -506,13 +511,15 @@ def analyse(s: Session, findings):
                     else "wrong id/path" if WRONG_ID_RE.search(r["text"]) else "error")
             call = r["call"]
             wasted = call["out"] * price(call["model"])[1] / 1e6 / max(1, call["n_tools"]) if call else 0.0
-            add(16, wasted + s.carry(r["t"], r["tokens"]), f"{name} {kind} (~{r['tokens']:,} tokens of error text)")
+            add(16, wasted + s.carry(r["t"], r["tokens"]), f"{name} {kind} (~{r['tokens']:,} tokens of error text)",
+                ref=r["id"])
             if kind == "schema error":
                 add(lid(135), wasted + s.carry(r["t"], r["tokens"]), f"{name} rejected its arguments")
         if name == "Read" and path:
             key = (path, inp.get("offset"), inp.get("limit"))
             if key in seen_reads and path not in edited_since:
-                add(7, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
+                add(7, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)",
+                    overlap=True)
                 add(lid(72), s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)")
                 continue
             seen_reads[key] = r["t"]
@@ -525,12 +532,13 @@ def analyse(s: Session, findings):
         dep_lines = [l for l in r["text"].splitlines() if DEP_DIRS.search(l)]
         if name in ("Grep", "Glob", "Bash", "LS") and len(dep_lines) >= 5:
             dep_tokens = int(r["tokens"] * len(dep_lines) / max(1, len(r["text"].splitlines())))
-            add(7, s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
+            add(7, s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)",
+                overlap=True)
             add(lid(76), s.carry(r["t"], dep_tokens), f"{name} returned results from dependency/build folders ({len(dep_lines)}+ lines)")
         elif r["tokens"] > BIG_RESULT:
             what = os.path.basename(path) if path else (str(inp.get("command", ""))[:40] or name)
             add(17 if name == "Bash" else 7, s.carry(r["t"], r["tokens"] - BIG_KEEP),
-                f"{name} result ~{r['tokens']:,} tokens ({what})")
+                f"{name} result ~{r['tokens']:,} tokens ({what})", ref=r["id"])
 
     # 8. Wordy responses: output share and whole-file rewrites of existing files
     findings["_output_cost"].append(sum(c["out"] * price(c["model"])[1] / 1e6 for c in s.calls))
@@ -553,7 +561,8 @@ def analyse(s: Session, findings):
         if r["error"]:
             attempts[key] += 1
             if attempts[key] >= 3:
-                add(9, r["call"]["cost"], f"{r['name']} failed {attempts[key]} times with the same input")
+                add(9, r["call"]["cost"], f"{r['name']} failed {attempts[key]} times with the same input",
+                    ref=r["id"])
         else:
             attempts[key] = 0
 
@@ -726,7 +735,7 @@ def additional_table(findings, total, w, examples_for=10):
     return [(f"A{n}", name, items) for n, name, group, reason, cost, items in costly]
 
 
-def report(findings, md_path=None, top=3, core_only=False):
+def report(findings, md_path=None, top=3, show_all=False, core_only=False):
     sessions = findings["_sessions"]
     total = sum(s.cost + s.helper_cost for s in sessions)
     lines = []
@@ -734,6 +743,72 @@ def report(findings, md_path=None, top=3, core_only=False):
     days = sorted({datetime.fromtimestamp(c["t"], timezone.utc).date() for s in sessions for c in s.calls})
     w(f"# Token leak report\n")
     w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, API-equivalent spend ${total:,.2f}\n" if days else "no data\n")
+    if show_all:
+        examples = legacy_tables(findings, total, sessions, w, core_only)
+    else:
+        examples = curated_table(findings, total, sessions, w)
+    for label, name, items in examples:
+        items = sorted(items, key=lambda i: -i["cost"])[:top]
+        if items:
+            w(f"\n## {label}. {name}: largest examples")
+            for i in items:
+                w(f"- ${i['cost']:.2f}  {i['project']} / session {i['session']}: {i['detail']}")
+    text = "\n".join(lines)
+    print(text)
+    if md_path:
+        with open(md_path, "w") as f:
+            f.write(text + "\n")
+        print(f"\nwrote {md_path}")
+
+
+def merged_items(sources, findings):
+    """Findings of a curated row. A tool result flagged by several of its sources counts once,
+    under the source that charged it most; findings without a ref are kept as they are."""
+    items, by_ref = [], {}
+    for k in sources:
+        per_ref = defaultdict(list)
+        for i in findings.get(k, []):
+            if i.get("overlap"):
+                continue
+            if i.get("ref"):
+                per_ref[i["ref"]].append(i)
+            else:
+                items.append(i)
+        for ref, group in per_ref.items():
+            cost = sum(i["cost"] for i in group)
+            if ref not in by_ref or cost > by_ref[ref][0]:
+                by_ref[ref] = (cost, group)
+    return items + [i for cost, group in by_ref.values() for i in group]
+
+
+def curated_table(findings, total, sessions, w):
+    """The 50 categories of leak_categories.py; returns example lists for the costliest rows."""
+    w("| # | Leak | Group | Est. cost | Share of spend | Instances | Note |")
+    w("|---|---|---|---|---|---|---|")
+    rows = []
+    for n, (name, group, sources) in leak_categories.CATEGORIES.items():
+        items = merged_items(sources, findings)
+        core = sources[0] if sources[0] in LEAKS and sources[0] not in PARENT else None
+        reason = unmeasurable(core, findings) if core else None
+        note = note_for(core, findings, total, sessions) if core else ""
+        if not note and n in leak_categories.REVIEW:
+            note = "spend to review, not all waste"
+        rows.append((n, name, group, sum(i["cost"] for i in items), items, reason, note))
+    rows.sort(key=lambda r: (r[5] is not None, -r[3], r[0]))
+    for n, name, group, cost, items, reason, note in rows:
+        if reason:
+            w(f"| {n} | {name} | {group} | unmeasurable | - | - | {'; '.join(x for x in (reason, note) if x)} |")
+            continue
+        share = f"{cost / total:.1%}" if total else "-"
+        w(f"| {n} | {name} | {group} | ${cost:,.2f} | {share} | {len(items)} | {note} |")
+    w("\nCosts overlap (a leaked tool result inside a never-ending session counts in both), so do not add them up. "
+      "Run with --all for the full canvas list.\n")
+    costly = [r for r in rows if r[4] and not r[5]][:leak_categories.EXAMPLE_ROWS]
+    return [(str(n), name, items) for n, name, group, cost, items, reason, note in costly]
+
+
+def legacy_tables(findings, total, sessions, w, core_only):
+    """The full canvas list (--all): core leaks, then the additional categories unless core_only."""
     w("| # | Leak | Category | Est. cost | Share of spend | Instances | Note |")
     w("|---|---|---|---|---|---|---|")
     rows = []
@@ -753,18 +828,7 @@ def report(findings, md_path=None, top=3, core_only=False):
     examples = [(label, name, findings.get(k, [])) for k, label, name, group, cost, n in rows]
     if not core_only:
         examples += additional_table(findings, total, w)
-    for label, name, items in examples:
-        items = sorted(items, key=lambda i: -i["cost"])[:top]
-        if items:
-            w(f"\n## {label}. {name}: largest examples")
-            for i in items:
-                w(f"- ${i['cost']:.2f}  {i['project']} / session {i['session']}: {i['detail']}")
-    text = "\n".join(lines)
-    print(text)
-    if md_path:
-        with open(md_path, "w") as f:
-            f.write(text + "\n")
-        print(f"\nwrote {md_path}")
+    return examples
 
 
 def main():
@@ -777,7 +841,9 @@ def main():
                     help="cache lifetime: 1h on subscriptions, 5m on API keys or usage credits")
     ap.add_argument("--md", help="also write the report as Markdown")
     ap.add_argument("--top", type=int, default=3, help="examples shown per leak")
-    ap.add_argument("--core", action="store_true", help="only the core leaks, without the additional categories")
+    ap.add_argument("--all", action="store_true", dest="show_all",
+                    help="the full canvas list (core leaks and all additional categories) instead of the 50 categories")
+    ap.add_argument("--core", action="store_true", help="with --all: only the core leaks, without the additional categories")
     a = ap.parse_args()
     since = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() if a.since else 0
     if a.days:
@@ -791,7 +857,7 @@ def main():
         print(f"no sessions found under {a.root}")
         return
     cross_session(findings)
-    report(findings, a.md, a.top, a.core)
+    report(findings, a.md, a.top, a.show_all or a.core, a.core)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # token-metrics plugin
 
 Measures every Claude Code task (tokens, cost, latency, frustration, outcome) by category, and ranks
-token leaks by estimated cost, using the categories from the team's Leak Categories canvas
+token leaks by estimated cost in 50 categories built from the team's Leak Categories canvas
 (see `token-leak-categories.md` at the repo root). Your settings.json hooks are not modified: plugin hooks run
 alongside your own. All data stays in `~/.claude/metrics/`.
 
@@ -22,7 +22,8 @@ python3 ~/.claude/metrics/analyze.py --csv tasks.csv
 ```
 
 The scripts are copied to `~/.claude/metrics/` at the start of each session, so this path stays
-valid after plugin updates. Add `--core` to skip the additional-categories table, and `--ttl 5m` to the leak report if you use an API key or usage credits.
+valid after plugin updates. Add `--all` to the leak report for the full canvas list (core leaks plus all
+additional categories), `--all --core` for the core leaks only, and `--ttl 5m` if you use an API key or usage credits.
 
 ## Privacy
 

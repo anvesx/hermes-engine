@@ -29,7 +29,7 @@ import leak_categories
 import leak_report
 
 FORMAT = 1
-CLIENT = "token-metrics/1.5.3"
+CLIENT = "token-metrics/1.5.5"
 CTX_BUCKETS = ((0, 100_000), (100_000, 250_000), (250_000, 500_000), (500_000, float("inf")))
 GAP_BUCKETS_MIN = ((5, 60), (60, 180), (180, 720), (720, float("inf")))   # idle gap before a full cache rewrite
 TOKEN_TYPES = (("input", "in"), ("cache_write", "cw"), ("cache_read", "cr"), ("output", "out"))
@@ -107,6 +107,21 @@ def export(root, events):
                            "instances": len(items) if reason is None else None})
     categories.sort(key=lambda c: c["n"])
 
+    # the same categories counted in tokens (every token weighs 1; cache categories become tokens written)
+    leak_report.set_units("tokens")
+    try:
+        ft = collect(root, events)
+        st = [s for s in ft["_sessions"] if s.calls]
+        ttotal = sum(s.cost + s.helper_cost for s in st)
+        categories_tokens = sorted(({"n": n, "measurable": reason is None,
+                                     "tokens": round(cost) if reason is None else None,
+                                     "share": round(cost / ttotal, 5) if reason is None and ttotal else None,
+                                     "cache_event": n in leak_categories.CACHE_EVENTS}
+                                    for n, name, group, cost, items, reason, note in leak_report.curated_rows(ft, ttotal, st)),
+                                   key=lambda c: c["n"])
+    finally:
+        leak_report.set_units("usd")
+
     calib = defaultdict(list)
     for s in ss:
         for model, v in getattr(s, "calibration_samples", {}).items():
@@ -123,7 +138,7 @@ def export(root, events):
         "by_model": {m: {"tokens": v["tokens"], "usd": round(v["usd"], 2)} for m, v in by_model.items()},
         "helper_usd": round(sum(s.helper_cost for s in ss), 2),
         "ctx_buckets": ctx_buckets, "rewrite_gaps": gap_buckets,
-        "sessions": sessions, "categories": categories,
+        "sessions": sessions, "categories": categories, "categories_tokens": categories_tokens,
         "chars_per_token": {k: {"median": round(statistics.median(v), 3), "samples": len(v)} for k, v in calib.items()},
     }
 
@@ -170,6 +185,12 @@ def merge(paths):
             if c["measurable"]:
                 cats[c["n"]]["usd"] += c["usd"]
                 cats[c["n"]]["shares"].append(c["share"])
+    tcats = defaultdict(lambda: {"tokens": 0, "shares": []})
+    for e in exports:
+        for c in e.get("categories_tokens", []):
+            if c["measurable"]:
+                tcats[c["n"]]["tokens"] += c["tokens"]
+                tcats[c["n"]]["shares"].append(c["share"])
     gaps = defaultdict(lambda: {"rewrites": 0, "usd": 0.0})
     for e in exports:
         for g in e["rewrite_gaps"]:
@@ -202,6 +223,11 @@ def merge(paths):
                                "usd": round(v["usd"], 2), "pooled_share": round(v["usd"] / total, 4) if total else 0,
                                "share_by_contributor": spread(v["shares"])}
                               for n, v in cats.items()), key=lambda c: -c["usd"]),
+        "categories_tokens": sorted(({"n": n, "name": meta[n]["name"], "group": meta[n]["group"], "review": meta[n]["review"],
+                                      "cache_event": n in leak_categories.CACHE_EVENTS, "tokens": v["tokens"],
+                                      "pooled_share": round(v["tokens"] / alltok, 4) if alltok else 0,
+                                      "share_by_contributor": spread(v["shares"])}
+                                     for n, v in tcats.items()), key=lambda c: -c["tokens"]),
         "chars_per_token": {k: {"pooled_median_of_medians": q([x["median"] for x in v], 0.5),
                                 "samples": sum(x["samples"] for x in v), "contributors": len(v)} for k, v in calib.items()},
     }
@@ -217,7 +243,14 @@ def merge_text(m):
         s = m["usd_share_by_contributor"].get(k)
         lines.append(f"| {k} | {pct(m['token_share'].get(k))} | {pct(m['usd_share'].get(k))} | "
                      + (f"{pct(s['median'])} ({pct(s['p25'])}-{pct(s['p75'])})" if s else "-") + " |")
-    lines += ["\n| Category | Pooled cost | Pooled share | Share, median (IQR) across contributors |", "|---|---|---|---|"]
+    if m["categories_tokens"]:
+        lines += ["\n| Category (tokens) | Pooled tokens | Pooled share | Share, median (IQR) across contributors |", "|---|---|---|---|"]
+        for c in m["categories_tokens"][:20]:
+            s = c["share_by_contributor"]
+            tag = " (cache event)" if c["cache_event"] else " (review)" if c["review"] else ""
+            lines.append(f"| {c['n']}. {c['name']}{tag} | {c['tokens'] / 1e6:,.1f}M | {pct(c['pooled_share'])} | "
+                         f"{pct(s['median'])} ({pct(s['p25'])}-{pct(s['p75'])}) |")
+    lines += ["\n| Category (API-equivalent $) | Pooled cost | Pooled share | Share, median (IQR) across contributors |", "|---|---|---|---|"]
     for c in m["categories"][:20]:
         s = c["share_by_contributor"]
         lines.append(f"| {c['n']}. {c['name']}{' (review)' if c['review'] else ''} | ${c['usd']:,.2f} | "

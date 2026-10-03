@@ -145,7 +145,28 @@ def tokenizer(model):
     return "old" if any(k in m for k in OLD_TOKENIZER) else "new"
 
 
+UNITS = "usd"   # set_units("tokens") weighs every token as 1, so every cost below reads as a token count
+
+
+def set_units(units):
+    """'usd' prices calls at API list prices (the default); 'tokens' counts tokens instead."""
+    global UNITS
+    UNITS = units
+
+
+def cache_cost(tokens, usd):
+    """A cache miss sends no extra tokens: it turns cheap reads into dearer writes of the same tokens. So in token
+    units the cache detectors report the tokens written (a cache event), and in dollars the price difference."""
+    return tokens if UNITS == "tokens" else usd
+
+
+def fmt_cost(x):
+    return f"{x / 1e6:,.1f}M tokens" if UNITS == "tokens" else f"${x:,.2f}"
+
+
 def price(model):
+    if UNITS == "tokens":
+        return (1e6, 1e6, 1e6)   # cost = tokens; carry() = tokens x calls that re-read them
     m = (model or "").lower()
     version = next((k for k in PRICE_IDS if k in m), None)
     if version:
@@ -156,6 +177,8 @@ def price(model):
 def write_mult(usage, default):
     """Cache-write price as a multiple of the input price. Newer transcripts split writes by cache lifetime
     (5m: 1.25x, 1h: 2x); writes without that split use `default` (from --ttl)."""
+    if UNITS == "tokens":
+        return 1.0
     total = usage.get("cache_creation_input_tokens", 0) or 0
     split = usage.get("cache_creation") or {}
     if not total or not isinstance(split, dict):
@@ -557,7 +580,7 @@ def analyse(s: Session, findings):
         c, prev = s.calls[i], s.calls[i - 1]
         if c["cw"] > max(5_000, 0.5 * c["ctx"]):
             pi, _, pr = price(c["model"])
-            premium = c["cw"] * (pi * c["wmult"] - pr) / 1e6
+            premium = cache_cost(c["cw"], c["cw"] * (pi * c["wmult"] - pr) / 1e6)
             x = next((x for x in comp if prev["t"] < x <= c["t"]), None)
             if x is not None:
                 compaction[x]["rewrite"] += premium
@@ -620,14 +643,14 @@ def analyse(s: Session, findings):
                 f"{len(explore)} reads/searches before the first edit")
 
     # 6. Bigger model than needed: premium models on simple categories, and premium helpers
-    for tsk in tasks:
+    for tsk in tasks if UNITS == "usd" else []:   # a model-choice question: in tokens a smaller model reads the same
         if tsk["category"] in SIMPLE_CATEGORIES:
             for c in tsk["calls"]:
                 if top_tier(c["model"]):
                     pi, po, pr = CHEAPER
                     cheaper = (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr + c["out"] * po) / 1e6
                     add(6, c["cost"] - cheaper, f"[{tsk['category']}] task on {c['model']}")
-    for c in s.helper_calls:
+    for c in s.helper_calls if UNITS == "usd" else []:
         if top_tier(c["model"]):
             pi, po, pr = CHEAPER
             cheaper = (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr + c["out"] * po) / 1e6
@@ -817,7 +840,7 @@ def analyse(s: Session, findings):
     first_typed = next((p["text"] for p in s.prompts if not p["text"].lstrip().startswith("<")), "")
     s.first_words = prompt_words(first_typed)
 
-    leak_extra.analyse(s, tasks, add, price)   # the canvas's "Additional categories" (A rows)
+    leak_extra.analyse(s, tasks, add, price, cache_cost)   # the canvas's "Additional categories" (A rows)
     findings["_sessions"].append(s)
 
 
@@ -860,6 +883,8 @@ def unmeasurable(k, findings):
         return "unmeasurable without hook data (see #11)"
     if k == 11:
         return "coverage gap, not a cost: waste in uncovered sessions is unknown"
+    if k == 6 and UNITS == "tokens":
+        return "a model choice, not a token count: a smaller model reads the same tokens"
     return None
 
 
@@ -922,7 +947,7 @@ def additional_table(findings, total, w, examples_for=10):
         else:
             share = f"{cost / total:.1%}" if total else "-"
             note = "spend to review, not all waste" if n in leak_extra.REVIEW else ""
-            w(f"| A{n} | {name} | {group} | ${cost:,.2f} | {share} | {len(items)} | {note} |")
+            w(f"| A{n} | {name} | {group} | {fmt_cost(cost)} | {share} | {len(items)} | {note} |")
     costly = sorted((r for r in measured if r[5]), key=lambda r: -r[4])[:examples_for]
     return [(f"A{n}", name, items) for n, name, group, reason, cost, items in costly]
 
@@ -934,7 +959,10 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
     w = lines.append
     days = sorted({datetime.fromtimestamp(c["t"], timezone.utc).date() for s in sessions for c in s.calls})
     w(f"# Token leak report\n")
-    w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, API-equivalent spend ${total:,.2f}\n" if days else "no data\n")
+    size = f"{total / 1e6:,.1f}M tokens processed" if UNITS == "tokens" else f"API-equivalent spend ${total:,.2f}"
+    w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, {size}\n" if days else "no data\n")
+    if UNITS == "tokens":
+        w("Every token counts as 1. Cache categories are cache events: the tokens written to cache, not extra tokens.\n")
     cal = findings["_calibration"]
     if cal:
         own = sum(1 for _, n in cal if n)
@@ -950,7 +978,7 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
         if items:
             w(f"\n## {label}. {name}: largest examples")
             for i in items:
-                w(f"- ${i['cost']:.2f}  {i['project']} / session {i['session']}: {i['detail']}")
+                w(f"- {fmt_cost(i['cost'])}  {i['project']} / session {i['session']}: {i['detail']}")
     text = "\n".join(lines)
     print(text)
     if md_path:
@@ -990,6 +1018,8 @@ def curated_rows(findings, total, sessions):
         note = note_for(core, findings, total, sessions) if core else ""
         if not note and n in leak_categories.REVIEW:
             note = "spend to review, not all waste"
+        if UNITS == "tokens" and n in leak_categories.CACHE_EVENTS:
+            note = "cache event: tokens written, not extra tokens"
         rows.append((n, name, group, sum(i["cost"] for i in items), items, reason, note))
     rows.sort(key=lambda r: (r[5] is not None, -r[3], r[0]))
     return rows
@@ -1005,7 +1035,7 @@ def curated_table(findings, total, sessions, w):
             w(f"| {n} | {name} | {group} | unmeasurable | - | - | {'; '.join(x for x in (reason, note) if x)} |")
             continue
         share = f"{cost / total:.1%}" if total else "-"
-        w(f"| {n} | {name} | {group} | ${cost:,.2f} | {share} | {len(items)} | {note} |")
+        w(f"| {n} | {name} | {group} | {fmt_cost(cost)} | {share} | {len(items)} | {note} |")
     w("\nCosts overlap (a leaked tool result inside a never-ending session counts in both), so do not add them up. "
       "Run with --all for the full canvas list.\n")
     costly = [r for r in rows if r[4] and not r[5]][:leak_categories.EXAMPLE_ROWS]
@@ -1028,7 +1058,7 @@ def legacy_tables(findings, total, sessions, w, core_only):
             w(f"| {label} | {name} | {group} | unmeasurable | - | - | {'; '.join(x for x in (reason, note) if x)} |")
             continue
         share = f"{cost / total:.1%}" if total else "-"
-        w(f"| {label} | {name} | {group} | ${cost:,.2f} | {share} | {n} | {note} |")
+        w(f"| {label} | {name} | {group} | {fmt_cost(cost)} | {share} | {n} | {note} |")
     w("\nCosts overlap (a leaked tool result inside a never-ending session counts in both), so do not add them up.\n")
     examples = [(label, name, findings.get(k, [])) for k, label, name, group, cost, n in rows]
     if not core_only:
@@ -1045,12 +1075,15 @@ def main():
     ap.add_argument("--ttl", choices=["5m", "1h"], default="1h",
                     help="cache lifetime: 1h on subscriptions, 5m on API keys or usage credits. Cache writes are "
                          "priced by the lifetime the transcript records; this is the fallback and sets break detection")
+    ap.add_argument("--units", choices=["usd", "tokens"], default="usd",
+                    help="usd: API list prices (default); tokens: every token counts as 1")
     ap.add_argument("--md", help="also write the report as Markdown")
     ap.add_argument("--top", type=int, default=3, help="examples shown per leak")
     ap.add_argument("--all", action="store_true", dest="show_all",
                     help="the full canvas list (core leaks and all additional categories) instead of the 50 categories")
     ap.add_argument("--core", action="store_true", help="with --all: only the core leaks, without the additional categories")
     a = ap.parse_args()
+    set_units(a.units)
     since = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() if a.since else 0
     if a.days:
         since = datetime.now(timezone.utc).timestamp() - a.days * 86400

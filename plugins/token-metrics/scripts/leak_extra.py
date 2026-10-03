@@ -239,7 +239,7 @@ def is_web_search(name):
 # ------------------------------------------------------------------ per-session detectors
 
 
-def analyse(s, tasks, add, price):
+def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
     calls, results = s.calls, sorted(s.results, key=lambda r: r["t"])
     if not calls:
         return
@@ -290,17 +290,17 @@ def analyse(s, tasks, add, price):
     for stream in streams:
         for i, c in enumerate(stream):
             pi, _, pr = price(c["model"])
-            premium += c["cw"] * pi * (c["wmult"] - 1) / 1e6
+            premium += cache_cost(c["cw"], c["cw"] * pi * (c["wmult"] - 1) / 1e6)
             if c["in"] > UNCACHED_MIN:
-                uncached, n_uncached = uncached + c["in"] * (pi - pr) / 1e6, n_uncached + 1
+                uncached, n_uncached = uncached + cache_cost(c["in"], c["in"] * (pi - pr) / 1e6), n_uncached + 1
             elif c["cw"] == c["cr"] == 0 and c["in"] and c["ctx"] < min_cacheable(c["model"]):
-                below, n_below = below + c["in"] * (pi - pr) / 1e6, n_below + 1
+                below, n_below = below + cache_cost(c["in"], c["in"] * (pi - pr) / 1e6), n_below + 1
             if i == 0:
                 cold += c["cw"] * pi * c["wmult"] / 1e6
             if c["cw"] > 1_000:
                 nxt = stream[i + 1] if i + 1 < len(stream) else None
                 if not (nxt and nxt["t"] - c["t"] < s.ttl_s and nxt["cr"]):
-                    unused, n_unused = unused + c["cw"] * pi * (c["wmult"] - 1) / 1e6, n_unused + 1
+                    unused, n_unused = unused + cache_cost(c["cw"], c["cw"] * pi * (c["wmult"] - 1) / 1e6), n_unused + 1
     if n_uncached:
         add(lid(21), uncached, f"{n_uncached} calls with {UNCACHED_MIN:,}+ uncached input tokens")
     if n_below:
@@ -317,7 +317,7 @@ def analyse(s, tasks, add, price):
     for prev, c in zip(starts, starts[1:]):
         if c["t"] - prev["t"] <= CONCURRENT_S and c["cw"] > 5_000 and prev["cw"] > 5_000:
             pi, _, pr = price(c["model"])
-            add(lid(34), c["cw"] * (pi * c["wmult"] - pr) / 1e6, f"helper agent wrote ~{c['cw']:,} tokens of cache at the same moment as a sibling")
+            add(lid(34), cache_cost(c["cw"], c["cw"] * (pi * c["wmult"] - pr) / 1e6), f"helper agent wrote ~{c['cw']:,} tokens of cache at the same moment as a sibling")
 
     # A45 Replanning after every minor update: plan/todo updates per task beyond the limit
     for tsk in tasks:

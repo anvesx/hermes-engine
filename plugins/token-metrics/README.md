@@ -44,6 +44,8 @@ The scripts are copied to `~/.claude/metrics/` at the start of each session, so 
 valid after plugin updates. Add `--all` to the leak report for the full canvas list (core leaks plus all
 additional categories), `--all --core` for the core leaks only, and `--ttl 5m` if you use an API key or usage credits.
 Costs use API list prices for each model version, and cache writes are priced by the lifetime the transcript records.
+Add `--units tokens` to count every token as 1 instead of pricing it; cache categories then report the tokens
+written to cache (cache events), since a cache miss sends no extra tokens.
 Item sizes are estimated with a characters-per-token ratio each session measures from its own tool results
 (or a per-tokenizer default); the report states the ratio it used.
 

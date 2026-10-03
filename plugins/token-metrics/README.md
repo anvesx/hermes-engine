@@ -7,17 +7,35 @@ alongside your own. Data stays in `~/.claude/metrics/` unless you join the compa
 
 ## Install
 
-From the shared zip (it unpacks to a `plugins` folder, which is also a local marketplace named `devx`):
+Inside Claude Code:
+
+```
+/plugin marketplace add anvesx/hermes-engine
+/plugin install token-metrics@hermes-engine
+/reload-plugins
+```
+
+The same from a terminal: `claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine`,
+then start `claude` as usual. To join the company leaderboard, use your own work email, then the code it sends you:
+
+```
+/token-metrics:dashboard you@devxlabs.ai
+/token-metrics:dashboard verify <code> Your Name
+```
+
+To update: `/plugin marketplace update hermes-engine`, then `/plugin update token-metrics@hermes-engine` and `/reload-plugins`.
+
+From a zip instead (it unpacks to a `plugins` folder, which is also a local marketplace named `hermes-engine`):
 
 ```bash
 cd ~/Downloads && unzip token-metrics.zip
 claude plugin marketplace add ~/Downloads/plugins
-claude plugin install token-metrics@devx
+claude plugin install token-metrics@hermes-engine
 ```
 
-Then start `claude` as usual and run `/token-metrics:dashboard`. Installing copies the plugin into Claude Code's
-plugin cache, so the unzipped folder can be deleted afterwards. To update from a newer zip, unzip it over the old
-folder and run `claude plugin marketplace update devx && claude plugin update token-metrics@devx`.
+Installing copies the plugin into Claude Code's plugin cache, so the unzipped folder can be deleted afterwards. To update
+from a newer zip, unzip it over the old folder and run
+`claude plugin marketplace update hermes-engine && claude plugin update token-metrics@hermes-engine`.
 To try it for one session without installing: `claude --plugin-dir ~/Downloads/plugins/token-metrics`
 (the hooks, including the hourly leaderboard sync, only run in sessions started that way).
 

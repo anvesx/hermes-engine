@@ -1,11 +1,11 @@
 {
   "name": "hermes-engine",
   "owner": { "name": "hermes-engine" },
-  "description": "Claude Code plugins from the hermes-engine repo (zip layout)",
+  "description": "Claude Code plugins from the hermes-engine repo",
   "plugins": [
     {
       "name": "token-metrics",
-      "source": "./token-metrics",
+      "source": "./plugins/token-metrics",
       "description": "Per-task token metrics, a ranked token-leak report, and the opt-in company leaderboard for Claude Code."
     }
   ]

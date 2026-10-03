@@ -312,6 +312,7 @@ class Session:
                 grew = b["ctx"] - a["ctx"] - a["out"]
                 if grew > 0 and CALIBRATE_RANGE[0] <= r["chars"] / grew <= CALIBRATE_RANGE[1]:
                     samples[a["model"]].append(r["chars"] / grew)
+        self.calibration_samples = dict(samples)
         self.calibration = {m: (statistics.median(v), len(v)) for m, v in samples.items() if len(v) >= CALIBRATE_MIN}
         models = Counter(c["model"] for c in self.calls or self.helper_calls)
         self.main_model = models.most_common(1)[0][0] if models else ""

@@ -76,6 +76,8 @@ Detectors call `add_finding(...)` / `add(...)`:
 - On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
 - The payload must never contain prompt text, project names, file paths or session ids.
 
+**Research export.** `research.py export` writes one anonymous JSON file for the token-leak study (`/token-metrics:research-export`); `research.py merge a.json b.json …` pools contributors' files and reports each number with its spread across contributors. Same privacy rule as the payload, plus no timestamps; per-session rows are shuffled and carry no ids. Bump `FORMAT` for breaking changes.
+
 **Leaderboard backend (`leaderboard/`).**
 - `lib/validate.ts` keeps only whitelisted, range-checked fields from each payload, because clients report their own numbers. `weekly_stats` stores one row per user and week, replaced on each sync.
 - Scoring happens on read, in `lib/score.ts`. `lib/board.ts` scores every player in memory on each request, which is fine at company size. Points:

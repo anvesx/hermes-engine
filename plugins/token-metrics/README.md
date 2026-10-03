@@ -14,6 +14,7 @@ alongside your own. Data stays in `~/.claude/metrics/` unless you join the compa
 | `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display) |
 | `/token-metrics:task-report` | Metrics by category |
 | `/token-metrics:wrapped` | Your usage in numbers: tokens, API-equivalent spend, active hours, streaks, biggest leaks (local only) |
+| `/token-metrics:research-export` | Writes an anonymous aggregate file for the team's token-leak study (totals, shares and session sizes; no prompts, code, paths, project names or ids). `preview` prints it instead. Nothing is sent: you send the file yourself |
 | `/token-metrics:dashboard` | The company leaderboard, in one command: joins you if needed, syncs, and opens your personal dashboard in the browser (see below) |
 
 Free alternative from a terminal:

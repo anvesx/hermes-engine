@@ -25,7 +25,7 @@ CATEGORIES = {
     1: ("Heavy starting context", GROUP_START, [1]),
     2: ("Cache-write premium", GROUP_CACHE, [lid(37)]),
     3: ("Cold cache at session and agent start", GROUP_CACHE, [lid(22)]),
-    4: ("Cache expired after a break", GROUP_CACHE, [3]),
+    4: ("Cache expired after a break", GROUP_CACHE, [26]),
     5: ("Many agents", GROUP_AGENTS, [4]),
     6: ("Long history replay", GROUP_HISTORY, [lid(1)]),
     7: ("Interrupted turns", GROUP_RETRY, [lid(134)]),

@@ -23,7 +23,7 @@ python3 plugins/token-metrics/scripts/analyze.py --since 2026-10-01 --csv tasks.
 python3 plugins/token-metrics/scripts/stats.py [--json]                  # "Wrapped" summary, or the exact sync payload
 ```
 
-`--ttl 5m` is for API-key and usage-credit users (5-minute cache, 1.25x write cost). The default `1h` is for subscriptions (2x write cost). `--root` and `--events` override the input paths.
+Cache writes are priced by the lifetime each transcript entry records (`usage.cache_creation`: 5m at 1.25x input, 1h at 2x). `--ttl` is the fallback for entries without that split, and sets the cache lifetime used to detect breaks: `5m` for API-key and usage-credit users, the default `1h` for subscriptions. `--root` and `--events` override the input paths.
 
 To test the hook, pipe a hook payload into it. Set `CC_METRICS_DIR` so it writes to a scratch directory instead of `~/.claude/metrics`:
 
@@ -58,7 +58,7 @@ Prompt text is not stored unless `CC_METRICS_KEEP_PROMPTS=1`.
 - A new report module has to be added to the list in `sync_report_scripts()`.
 
 **Three layers of leak definitions:**
-1. `leak_report.py` holds the `Session` transcript parser, the cost model and the **core leaks**. They are keyed by integer id in `LEAKS` (1–25; ids 23–25 are the 4a–4c breakdowns, see `PARENT`) and detected in `analyse()` and `cross_session()`.
+1. `leak_report.py` holds the `Session` transcript parser, the cost model and the **core leaks**. They are keyed by integer id in `LEAKS` (1–26; ids 23–25 are the 4a–4c breakdowns and 26 is 3a, the break-only part of #3, see `PARENT`) and detected in `analyse()` and `cross_session()`.
 2. `leak_extra.py` holds the canvas's **additional categories** ("A rows") in `ADDITIONAL`. Each one is measured, aliased to a core leak (`SAME_AS`), or given an "unmeasurable" reason. Their finding keys are `lid(n) = 1000 + n`, which keeps them apart from core ids in the shared `findings` dict.
 3. `leak_categories.py` defines the **50 curated categories** that the default report shows. Each sums a list of finding keys, mixing core ids and `lid(...)`. Category numbers are fixed even though the table re-sorts by cost on every run.
 
@@ -86,12 +86,12 @@ Detectors call `add_finding(...)` / `add(...)`:
 - Public pages are `/u/[handle]` and `/u/[handle]/card.png`, which renders with `next/og`. They show only the fields enabled in the user's `card_fields`. Everything else requires sign-in. `/admin` is limited to `ADMIN_EMAILS`.
 - `/u/[handle]` doubles as the owner's dashboard: signed in as that user (and without `?public=1`), it renders `app/u/[handle]/dashboard.tsx` from `lib/dashboard.ts` instead of the public card. `/token-metrics:dashboard` (`share.py dashboard`) gets there by calling `POST /api/auth/link`, which returns a single-use, 5-minute link; `GET /api/auth/link?t=…` spends it, sets the web session cookie and redirects. Links live in the `login_links` table.
 
-**Cost model.** Per-call token counts come from transcript `usage` and are exact. The size of individual items is estimated at 4 chars/token; images use their pixel dimensions. A leaked item is charged at the cache-read price on every later call that re-reads it, until the next compaction. Prices are API list prices.
+**Cost model.** Per-call token counts come from transcript `usage` and are exact. The size of individual items is estimated at 4 chars/token; images use their pixel dimensions. A leaked item is charged at the cache-read price on every later call that re-reads it, until the next compaction. Prices are API list prices per model version (`PRICES`; Opus 4.x and Opus 5.5 differ), matched longest id first; an unlisted version falls back to its family's current model. Entries with model `<synthetic>` are written by Claude Code itself and are skipped.
 
 ## Keeping things in sync
 
 - Some definitions are copied, not shared, because each script must run alone:
-  - `PRICES` appears in both `leak_report.py` and `analyze.py`.
+  - `PRICES` (and the cache-write multipliers) appear in both `leak_report.py` and `analyze.py`. Add new model versions to both.
   - `CORRECTION_RE` and `TAG_RE` appear in both `metrics_hook.py` and `leak_report.py`.
   - `SYNC_EVERY_S` appears in both `metrics_hook.py` and `share.py`.
   - The payload schema is built by `stats.py` and validated by `leaderboard/lib/validate.ts`. Bump `SCHEMA` in both for breaking changes.

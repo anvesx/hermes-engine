@@ -19,10 +19,23 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
-# USD per million tokens - verify against the current pricing page.
-PRICES = {"opus": (4.00, 20.00, 0.20), "sonnet": (2.00, 10.00, 0.20),
-          "haiku": (1.00, 5.00, 0.10), "fable": (10.00, 50.00, 0.25)}
-CACHE_WRITE_MULT = 1.25  # 5-minute writes; subscriptions often use 1-hour (2.0)
+# in, out, cache read per MTok, by model version (Anthropic first-party list prices); same table as leak_report.py
+PRICES = {
+    "claude-fable-5-1": (10.00, 50.00, 0.25), "claude-fable-5": (10.00, 50.00, 1.00),
+    "claude-opus-5-5": (4.00, 20.00, 0.20), "claude-opus-5": (5.00, 25.00, 0.50),
+    "claude-opus-4-8": (5.00, 25.00, 0.50), "claude-opus-4-7": (5.00, 25.00, 0.50),
+    "claude-opus-4-6": (5.00, 25.00, 0.50), "claude-opus-4-5": (5.00, 25.00, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20), "claude-sonnet-5": (2.00, 10.00, 0.20),
+    "claude-sonnet-4-6": (3.00, 15.00, 0.30), "claude-sonnet-4-5": (3.00, 15.00, 0.30),
+    "claude-haiku-4-5": (1.00, 5.00, 0.10),
+}
+PRICE_IDS = sorted(PRICES, key=len, reverse=True)
+FAMILY_PRICES = {"fable": PRICES["claude-fable-5-1"], "opus": PRICES["claude-opus-5-5"],
+                 "sonnet": PRICES["claude-sonnet-5-5"], "haiku": PRICES["claude-haiku-4-5"]}
+# cache-write price / input price by recorded cache lifetime; unrecorded writes use leak_report.py's default (1h)
+WRITE_MULT = {"ephemeral_5m_input_tokens": 1.25, "ephemeral_1h_input_tokens": 2.0}
+CACHE_WRITE_MULT = 2.0
+SYNTHETIC = "<synthetic>"   # messages Claude Code writes itself: not model calls
 
 FIELDS = ["session_id", "task_no", "category", "start", "prompts", "api_calls", "tool_calls",
           "models", "input", "cache_write", "cache_read", "output", "cost_usd", "cache_hit_rate",
@@ -36,10 +49,20 @@ def iso(ts):
 
 def price_for(model):
     m = (model or "").lower()
-    for key, p in PRICES.items():
-        if key in m:
-            return p
-    return PRICES["sonnet"]
+    version = next((k for k in PRICE_IDS if k in m), None)
+    if version:
+        return PRICES[version]
+    return next((p for k, p in FAMILY_PRICES.items() if k in m), FAMILY_PRICES["sonnet"])
+
+
+def write_cost_mult(usage):
+    total = usage.get("cache_creation_input_tokens", 0) or 0
+    split = usage.get("cache_creation") or {}
+    if not total or not isinstance(split, dict):
+        return CACHE_WRITE_MULT
+    known = {k: split.get(k, 0) or 0 for k in WRITE_MULT}
+    rest = max(0, total - sum(known.values()))
+    return (sum(n * WRITE_MULT[k] for k, n in known.items()) + rest * CACHE_WRITE_MULT) / total
 
 
 def read_transcript(path):
@@ -57,7 +80,7 @@ def read_transcript(path):
             if not ts:
                 continue
             msg = e.get("message") or {}
-            if e.get("type") == "assistant" and msg.get("usage"):
+            if e.get("type") == "assistant" and msg.get("usage") and msg.get("model") != SYNTHETIC:
                 mid = msg.get("id") or e.get("uuid")
                 if mid in seen:
                     continue
@@ -67,7 +90,8 @@ def read_transcript(path):
                              "input": u.get("input_tokens", 0) or 0,
                              "cache_write": u.get("cache_creation_input_tokens", 0) or 0,
                              "cache_read": u.get("cache_read_input_tokens", 0) or 0,
-                             "output": u.get("output_tokens", 0) or 0})
+                             "output": u.get("output_tokens", 0) or 0,
+                             "write_mult": write_cost_mult(u)})
             elif e.get("type") == "user" and "interrupted by user" in json.dumps(msg.get("content", "")):
                 interrupts.append(iso(ts))
     return msgs, interrupts
@@ -118,7 +142,7 @@ def build_tasks(events, since):
             cost = 0.0
             for m in mm:
                 pi, po, pr = price_for(m["model"])
-                cost += (m["input"] * pi + m["cache_write"] * pi * CACHE_WRITE_MULT
+                cost += (m["input"] * pi + m["cache_write"] * pi * m["write_mult"]
                          + m["cache_read"] * pr + m["output"] * po) / 1e6
             seen_in = tok["input"] + tok["cache_write"] + tok["cache_read"]
             ratings = [e for e in inside if e.get("kind") == "rating"]

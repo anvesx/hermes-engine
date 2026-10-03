@@ -17,7 +17,7 @@ Numbers were assigned by cost for 2026-09-01 to 2026-10-01 and stay fixed; the r
 | 1 | **Heavy starting context** | Starting context and setup | First call already carries a large prompt (system prompt, tools, memory, CLAUDE.md), repeated on every call | #1 |
 | 2 | **Cache-write premium** (review) | Prompt cache | The extra paid for cache writes over the normal input price | A37 |
 | 3 | **Cold cache at session and agent start** (review) | Prompt cache | The first cache write of each session and helper agent | A22 |
-| 4 | **Cache expired after a break** | Prompt cache | A break long enough for the cache to expire, so the whole context is rewritten | #3 |
+| 4 | **Cache expired after a break** | Prompt cache | A break long enough for the cache to expire, so the whole context is rewritten | #3a |
 | 5 | **Many agents** (review) | Agents | Heavy use of subagents, each with its own context and calls | #4 |
 | 6 | **Long history replay** (review) | Conversation history | Calls carrying more than 100k tokens of conversation history | A1 |
 | 7 | **Interrupted turns** | Retries and rework | Turns stopped before they finished, whose work is then redone | A134 |
@@ -60,7 +60,7 @@ Numbers were assigned by cost for 2026-09-01 to 2026-10-01 and stay fixed; the r
 | 44 | **Re-learning the codebase** | Exploration and file reading | Files that 2+ earlier sessions also explored before their first edit | #22 |
 | 45 | **High effort on trivial turns** | Model and output | Long thinking behind a short reply with no tool calls | #18 |
 | 46 | **Tool discovery and skill loading** | Starting context and setup | Repeated tool-search calls, reads of skill supporting documents, and invoked skill bodies above 3k tokens | A65, A69, A68 |
-| 47 | **Usage while idle** | Retries and rework | Turns that started without a typed prompt (needs hook data) | #10 |
+| 47 | **Usage while idle** | Retries and rework | Turns that started without a typed prompt, counted from the session's first hook record (needs hook data) | #10 |
 | 48 | **MCP tool schema bloat** | Starting context and setup | Definitions of MCP tools the session never called, sent on every call (part of 1) | #12 |
 | 49 | **Unused skills/plugins** | Starting context and setup | Listed skills and agent types the session never invoked (part of 1) | #13 |
 | 50 | **No visibility** | Observability | Sessions without hook data, so categories, ratings and idle time are unknown | #11 |
@@ -99,7 +99,7 @@ Costs overlap, so they don't add up to the total.
 
 ## Full canvas list (`--all`)
 
-`--all` prints the canvas numbering instead: 1-11 are the core leaks, 12-22 the additional ones, 4a-4c break down #4, and the A rows follow in a second table (`--all --core` hides it). The tables below give the detection signal for each canvas row.
+`--all` prints the canvas numbering instead: 1-11 are the core leaks, 12-22 the additional ones, 4a-4c break down #4, and 3a breaks out the break-only part of #3, and the A rows follow in a second table (`--all --core` hides it). The tables below give the detection signal for each canvas row.
 
 ### Core rows
 | # | Leak | Category | What it catches | Detection signal |
@@ -107,6 +107,7 @@ Costs overlap, so they don't add up to the total.
 | 1 | **Heavy starting context** | Persistent instructions and memory | Sessions whose very first call already carries a large prompt: system prompt, tool definitions, memory, CLAUDE.md. That cost repeats on every call. | First-request context above 10k tokens, re-read on every call |
 | 2 | **Sessions that never end** | Conversation history | One session reused for unrelated tasks, so a new task carries all the old context with it | A new task (tag or 30+ min gap) still carrying 20k+ tokens of prior context; compaction count |
 | 3 | **Losing the cache** | Cache misses and invalidation | Breaks long enough for the prompt cache to expire, so the next call rewrites the whole context at full write price | Large cache writes after a break, model switch or recorded prefix change (tools, system prompt, effort, organization; also counted in A25-A40), otherwise "context changed" (rewrites after compaction go to #19) |
+| 3a | **Cache expired after a break** | Cache misses and invalidation | The part of #3 caused by a break past the cache lifetime | Rewrites of #3 after a gap of an hour, or past the `--ttl` lifetime; not model switches or prefix changes |
 | 4 | **Many agents** | Multi-agent workflows | Heavy use of subagents, each with its own context and calls. Not always waste. | Helper-agent call count and share of session cost |
 | 4a | **Fork context duplication** | Multi-agent workflows | Forked subagents inherit the full parent context, so each one starts at 160k+ | Helper agent whose first call is above 50k tokens; excess re-read on each of its calls |
 | 4b | **Overlapping agents** | Multi-agent workflows | Parallel agents reading the same files | A file `Read` by a helper agent after a sibling agent already read it |
@@ -116,7 +117,7 @@ Costs overlap, so they don't add up to the total.
 | 7 | **Too much tool output** | Tools, MCP, skills, and plugins | Single tool results large enough to bloat context for the rest of the session | Duplicate reads, dependency-folder hits, non-shell results above 4k tokens |
 | 8 | **Wordy responses** | Answer and artifact generation | Output tokens spent on long replies or on rewriting whole files where an edit would do | Full-file `Write` on files already read; output share of spend |
 | 9 | **Retry loops** | Retries, automation, and context rebuilding | The same failing action repeated with little or no change | The same tool input failing 3+ times |
-| 10 | **Usage while idle** | Retries, automation, and context rebuilding | Tokens spent while no one is at the keyboard: background loops, monitors, scheduled wakeups | Turns that started without a typed prompt (needs hook data) |
+| 10 | **Usage while idle** | Retries, automation, and context rebuilding | Tokens spent while no one is at the keyboard: background loops, monitors, scheduled wakeups | Turns that started without a typed prompt (needs hook data). Only prompts after the session's first hook record count, since earlier ones were typed before the plugin was loaded |
 | 11 | **No visibility** | Observability coverage | Sessions with no hook data, so the report can't categorize them, collect ratings, or detect idle time | Share of sessions with hook data |
 | 12 | **MCP tool schema bloat** | Tools, MCP, skills, and plugins | Connected servers whose tool definitions get sent on every call | Tool definitions from the transcript's prompt snapshots: tokens of each MCP server's tools that the session (or its helpers) never called, re-read on every main call until the tools change. Sessions from Claude Code versions without snapshots are skipped (counted inside #1) |
 | 13 | **Unused skills/plugins** | Tools, MCP, skills, and plugins | Skill and plugin listings injected but never invoked | The skill listing and agent listing attachments: entries for skills never invoked (Skill tool or slash command) and agent types never used, carried until compaction (counted inside #1) |

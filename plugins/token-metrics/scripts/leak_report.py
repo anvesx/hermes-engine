@@ -41,8 +41,24 @@ from leak_extra import lid
 
 # ------------------------------------------------------------------ settings
 
-PRICES = {"fable": (10.00, 50.00, 0.25), "opus": (4.00, 20.00, 0.20),
-          "sonnet": (2.00, 10.00, 0.20), "haiku": (1.00, 5.00, 0.10)}   # in, out, cache read per MTok
+# in, out, cache read per MTok, by model version (Anthropic first-party list prices). Versions of one family
+# are priced differently (Opus 4.8 is $5/$25, Opus 5.5 $4/$20), so match the version, longest id first.
+PRICES = {
+    "claude-fable-5-1": (10.00, 50.00, 0.25), "claude-fable-5": (10.00, 50.00, 1.00),
+    "claude-opus-5-5": (4.00, 20.00, 0.20), "claude-opus-5": (5.00, 25.00, 0.50),
+    "claude-opus-4-8": (5.00, 25.00, 0.50), "claude-opus-4-7": (5.00, 25.00, 0.50),
+    "claude-opus-4-6": (5.00, 25.00, 0.50), "claude-opus-4-5": (5.00, 25.00, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20), "claude-sonnet-5": (2.00, 10.00, 0.20),
+    "claude-sonnet-4-6": (3.00, 15.00, 0.30), "claude-sonnet-4-5": (3.00, 15.00, 0.30),
+    "claude-haiku-4-5": (1.00, 5.00, 0.10),
+}
+PRICE_IDS = sorted(PRICES, key=len, reverse=True)
+# a version not listed above is priced as the family's current model
+FAMILY_PRICES = {"fable": PRICES["claude-fable-5-1"], "opus": PRICES["claude-opus-5-5"],
+                 "sonnet": PRICES["claude-sonnet-5-5"], "haiku": PRICES["claude-haiku-4-5"]}
+CHEAPER = PRICES["claude-sonnet-5-5"]   # what a simple task would have cost on the current Sonnet
+WRITE_MULT = {"ephemeral_5m_input_tokens": 1.25, "ephemeral_1h_input_tokens": 2.0}   # cache-write price / input price
+SYNTHETIC = "<synthetic>"   # messages Claude Code writes itself (errors, placeholders): not model calls
 TOP_TIER = ("opus", "fable")
 CHARS_PER_TOKEN = 4
 START_BASELINE = 10_000        # starting context considered reasonable
@@ -103,8 +119,9 @@ LEAKS = {
     20: ("20", "Correction churn", "Retries, automation, and context rebuilding"),
     21: ("21", "Visual iteration loops", "Images, PDFs, and browser interaction"),
     22: ("22", "Re-learning the codebase", "Repository discovery and file reading"),
+    26: ("3a", "Cache expired after a break", "Cache misses and invalidation"),
 }
-PARENT = {23: 4, 24: 4, 25: 4}
+PARENT = {23: 4, 24: 4, 25: 4, 26: 3}
 SPEND_NOT_WASTE = {4, 15}   # reported as spend to review, not counted as pure waste
 NOT_RECORDED = {   # older Claude Code versions don't record what was loaded, only what was used
     12: "needs the loaded tool definitions, which only newer Claude Code versions record (part of #1)",
@@ -119,7 +136,22 @@ def tok(chars):
 
 def price(model):
     m = (model or "").lower()
-    return next((p for k, p in PRICES.items() if k in m), PRICES["sonnet"])
+    version = next((k for k in PRICE_IDS if k in m), None)
+    if version:
+        return PRICES[version]
+    return next((p for k, p in FAMILY_PRICES.items() if k in m), FAMILY_PRICES["sonnet"])
+
+
+def write_mult(usage, default):
+    """Cache-write price as a multiple of the input price. Newer transcripts split writes by cache lifetime
+    (5m: 1.25x, 1h: 2x); writes without that split use `default` (from --ttl)."""
+    total = usage.get("cache_creation_input_tokens", 0) or 0
+    split = usage.get("cache_creation") or {}
+    if not total or not isinstance(split, dict):
+        return default
+    known = {k: split.get(k, 0) or 0 for k in WRITE_MULT}
+    rest = max(0, total - sum(known.values()))
+    return (sum(n * WRITE_MULT[k] for k, n in known.items()) + rest * default) / total
 
 
 def top_tier(model):
@@ -274,7 +306,7 @@ class Session:
                 if not e["_helper"]:
                     self.summaries.append((e["_t"], tok(text_len(content))))
                 continue
-            if e.get("type") == "assistant" and msg.get("usage"):
+            if e.get("type") == "assistant" and msg.get("usage") and msg.get("model") != SYNTHETIC:
                 mid = msg.get("id") or e.get("uuid")
                 c = by_id.get(mid)
                 if c is None:
@@ -316,8 +348,9 @@ class Session:
             c["cr"] = u.get("cache_read_input_tokens", 0) or 0
             c["out"] = u.get("output_tokens", 0) or 0
             c["ctx"] = c["in"] + c["cw"] + c["cr"]
+            c["wmult"] = write_mult(u, self.write_mult)
             pi, po, pr = price(c["model"])
-            c["cost"] = (c["in"] * pi + c["cw"] * pi * self.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
+            c["cost"] = (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr + c["out"] * po) / 1e6
             c["read_price"] = pr / 1e6
             uses = self.helper_tool_uses if c["helper"] else self.tool_uses
             c["n_tools"] = 0
@@ -452,6 +485,7 @@ def analyse(s: Session, findings):
         findings["_compactions"].append(len(s.compactions))
 
     # 3. Losing the cache: large rewrites after the first call, with likely cause.
+    # 3a. the ones caused by a break past the cache lifetime, so the curated row can show breaks alone.
     # 19. Compaction cost: rewrites right after a compaction, plus writing the summary.
     comp = s.comp_sorted
     compaction = {x: {"summary": 0, "rewrite": 0.0, "tokens": 0} for x in comp}
@@ -463,7 +497,7 @@ def analyse(s: Session, findings):
         c, prev = s.calls[i], s.calls[i - 1]
         if c["cw"] > max(5_000, 0.5 * c["ctx"]):
             pi, _, pr = price(c["model"])
-            premium = c["cw"] * (pi * s.write_mult - pr) / 1e6
+            premium = c["cw"] * (pi * c["wmult"] - pr) / 1e6
             x = next((x for x in comp if prev["t"] < x <= c["t"]), None)
             if x is not None:
                 compaction[x]["rewrite"] += premium
@@ -475,8 +509,10 @@ def analyse(s: Session, findings):
                 add(lid(30), premium, f"~{c['cw']:,} tokens rewritten switching {prev['model']} -> {c['model']}")
             elif gap >= 3600:
                 cause = f"break of {gap / 60:.0f} min"
+                add(26, premium, f"~{c['cw']:,} tokens rewritten, {cause}")
             elif gap >= s.ttl_s:
                 cause = f"break of {gap / 60:.0f} min (past cache lifetime)"
+                add(26, premium, f"~{c['cw']:,} tokens rewritten, {cause}")
             else:
                 event = next((x for x in s.prefix_events if prev["t"] < x[0] <= c["t"]), None)
                 cause = event[1] if event else "context changed (tools, instructions, settings)"
@@ -528,13 +564,13 @@ def analyse(s: Session, findings):
         if tsk["category"] in SIMPLE_CATEGORIES:
             for c in tsk["calls"]:
                 if top_tier(c["model"]):
-                    pi, po, pr = PRICES["sonnet"]
-                    cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
+                    pi, po, pr = CHEAPER
+                    cheaper = (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr + c["out"] * po) / 1e6
                     add(6, c["cost"] - cheaper, f"[{tsk['category']}] task on {c['model']}")
     for c in s.helper_calls:
         if top_tier(c["model"]):
-            pi, po, pr = PRICES["sonnet"]
-            cheaper = (c["in"] * pi + c["cw"] * pi * s.write_mult + c["cr"] * pr + c["out"] * po) / 1e6
+            pi, po, pr = CHEAPER
+            cheaper = (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr + c["out"] * po) / 1e6
             add(6, c["cost"] - cheaper, f"helper agent on {c['model']}")
     findings["_main_cost"].append(s.cost)
     findings["_top_tier_cost"].append(sum(c["cost"] for c in s.calls if top_tier(c["model"])))
@@ -611,12 +647,14 @@ def analyse(s: Session, findings):
         else:
             attempts[key] = 0
 
-    # 10. Usage while idle: prompts not typed by the developer (needs hook data)
+    # 10. Usage while idle: prompts not typed by the developer (needs hook data). Only prompts after the
+    # session's first hook record count: earlier ones were typed before the plugin was loaded.
     hp = s.hook_prompts.get(s.sid)
     if hp is not None:
         typed = [e["ts"] for e in hp]
+        covered_from = min(typed) - 15
         for n, p in enumerate(s.prompts):
-            if not any(abs(p["t"] - t) < 15 for t in typed):
+            if p["t"] >= covered_from and not any(abs(p["t"] - t) < 15 for t in typed):
                 end = s.prompts[n + 1]["t"] if n + 1 < len(s.prompts) else float("inf")
                 cost = sum(c["cost"] for c in s.calls if p["t"] <= c["t"] < end)
                 if cost:
@@ -939,7 +977,8 @@ def main():
     ap.add_argument("--since", help="YYYY-MM-DD")
     ap.add_argument("--days", type=int, help="only the last N days (instead of --since)")
     ap.add_argument("--ttl", choices=["5m", "1h"], default="1h",
-                    help="cache lifetime: 1h on subscriptions, 5m on API keys or usage credits")
+                    help="cache lifetime: 1h on subscriptions, 5m on API keys or usage credits. Cache writes are "
+                         "priced by the lifetime the transcript records; this is the fallback and sets break detection")
     ap.add_argument("--md", help="also write the report as Markdown")
     ap.add_argument("--top", type=int, default=3, help="examples shown per leak")
     ap.add_argument("--all", action="store_true", dest="show_all",

@@ -3,8 +3,9 @@ import { type Period, publicBase } from "@/lib/board";
 import type { Dashboard as Data } from "@/lib/dashboard";
 import { compact, hours, money, pct } from "@/lib/format";
 import { cardPath, cardVersion } from "@/lib/profile";
-import { LEVELS, RULES } from "@/lib/score";
+import { RULES } from "@/lib/score";
 import { PointsBars, ShareBars, SplitBar, WasteLine, WeekBars, dayLabel } from "./charts";
+import { Poster } from "./poster";
 
 const PERIODS: [Period, string][] = [["week", "This week"], ["month", "Last 4 weeks"], ["all", "All time"]];
 const CARD_FIELDS = ["name", "level", "badges", "streak", "tokens", "hours", "spend"];
@@ -26,8 +27,6 @@ function Delta({ now, before, fmt, lowerIsBetter = false }:
 
 export function Dashboard({ data, handle }: { data: Data; handle: string }) {
   const { profile: p, player, totals, trend, ranks, tokens: tk, this_week: tw, last_week: lw } = data;
-  const lv = p.level, floor = LEVELS[lv.level - 1][0];
-  const toNext = lv.next_at === null ? 1 : (lv.points - floor) / (lv.next_at - floor);
   const weeks = trend.map((t) => t.week);
   const weekPoints = p.weekPoints[trend[trend.length - 1].week] ?? 0;
   const lastPoints = p.weekPoints[trend[trend.length - 2].week] ?? null;
@@ -36,36 +35,20 @@ export function Dashboard({ data, handle }: { data: Data; handle: string }) {
 
   return (
     <main className="dash">
-      <nav className="row" style={{ justifyContent: "space-between", marginBottom: 16 }}>
-        <span className="muted">Token Metrics · your dashboard</span>
+      <nav className="dnav">
+        <span className="logo">TOKEN<i>/</i>METRICS</span>
         <form action="/api/auth/logout" method="post" className="row">
-          <Link href="/">Full leaderboard</Link>
+          <Link href="/">Leaderboard ↗</Link>
           <button className="link">Sign out</button>
         </form>
       </nav>
 
-      <section className="hero">
-        <div>
-          <div className="eyebrow">Level {lv.level}</div>
-          <h1>{player.user.display_name}</h1>
-          <div className="hero-title">{lv.title}</div>
-          <div className="lvl">
-            <div className="lvl-track"><div className="lvl-fill" style={{ width: `${Math.round(toNext * 100)}%` }} /></div>
-            <span>{lv.next_at === null ? `${p.points.toLocaleString()} points · top level`
-              : `${p.points.toLocaleString()} / ${lv.next_at.toLocaleString()} points to ${LEVELS[lv.level][1]}`}</span>
-          </div>
-        </div>
-        <div className="hero-ranks">
-          {([["week", "this week"], ["month", "last 4 weeks"], ["all", "all time"]] as const).map(([k, label]) => (
-            <div key={k} className="hero-rank">
-              <b>{ranks[k].rank ? `#${ranks[k].rank}` : "–"}</b>
-              <span>of {ranks[k].of} {label}</span>
-            </div>
-          ))}
-          <div className="hero-rank"><b>{p.streak_weeks}</b><span>week streak · best {p.best_streak_weeks}</span></div>
-        </div>
-      </section>
-      <p className="muted small">Last synced {ago(player.last_sync_at)}. Run <code>/token-metrics:dashboard</code> in Claude Code to refresh.</p>
+      <Poster data={data} handle={handle} />
+      <p className="sync">
+        <span>#{ranks.month.rank ?? "–"} of {ranks.month.of} last 4 weeks</span>
+        <span>#{ranks.all.rank ?? "–"} of {ranks.all.of} all time</span>
+        <span>synced {ago(player.last_sync_at)} · run <code>/token-metrics:dashboard</code> to refresh</span>
+      </p>
 
       {!hasData && (
         <p className="panel">No stats yet. Run <code>/token-metrics:dashboard</code> in Claude Code to send your first sync.</p>

@@ -16,17 +16,21 @@ export async function POST(req: Request) {
   const email = normaliseEmail(body?.email);
   const code = typeof body?.code === "string" ? body.code.trim() : "";
   if (!email || !/^\d{6}$/.test(code)) return fail("enter the 6-digit code from the email");
-  const row = await one<{ id: string; code_hash: string; attempts: number }>(
-    `SELECT id, code_hash, attempts FROM login_codes
-      WHERE email = $1 AND NOT used AND expires_at > now() ORDER BY created_at DESC LIMIT 1`,
-    [email],
+  // Count the attempt before checking it, in one statement: Postgres locks the row and re-checks
+  // `attempts < max`, so parallel guesses can't get past MAX_CODE_ATTEMPTS.
+  const row = await one<{ id: string; code_hash: string }>(
+    `UPDATE login_codes SET attempts = attempts + 1
+      WHERE id = (SELECT id FROM login_codes WHERE email = $1 AND NOT used AND expires_at > now()
+                  ORDER BY created_at DESC LIMIT 1)
+        AND attempts < $2
+      RETURNING id, code_hash`,
+    [email, MAX_CODE_ATTEMPTS],
   );
-  if (!row || row.attempts >= MAX_CODE_ATTEMPTS) return fail("code expired; request a new one", 400);
-  if (!sameHash(row.code_hash, sha256(code))) {
-    await q("UPDATE login_codes SET attempts = attempts + 1 WHERE id = $1", [row.id]);
-    return fail("wrong code", 400);
-  }
-  await q("UPDATE login_codes SET used = true WHERE id = $1", [row.id]);
+  if (!row) return fail("code expired; request a new one", 400);
+  if (!sameHash(row.code_hash, sha256(code))) return fail("wrong code", 400);
+  // spend the code exactly once, even if two correct guesses race
+  if (!(await one("UPDATE login_codes SET used = true WHERE id = $1 AND NOT used RETURNING id", [row.id])))
+    return fail("code expired; request a new one", 400);
 
   const user = await findOrCreateUser(email, body.display_name, true);
   const web = body.web === true;

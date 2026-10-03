@@ -6,9 +6,12 @@ import type { Week } from "@/lib/validate";
 const COLS = ["tokens", "cost_usd", "active_hours", "active_days", "sessions", "hook_sessions", "tasks",
               "tagged_tasks", "rated_tasks", "top_category", "waste_index"] as const;
 
+// Display names are user-chosen: a cell starting with = + - @ (or a tab/CR) would run as a formula in
+// Excel or Sheets, so prefix it with ' and quote it.
 const cell = (v: unknown) => {
-  const s = v === null || v === undefined ? "" : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  let s = v === null || v === undefined ? "" : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\n'\t\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
 export async function GET(req: Request) {

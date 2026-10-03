@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { cookies, headers } from "next/headers";
-import { one } from "./db";
+import { one, q } from "./db";
 
 export const SESSION_COOKIE = "tm_session";
 export const CODE_TTL_MIN = 10;
@@ -62,4 +62,23 @@ export async function clientIp() {
 export function slug(name: string) {
   const base = name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24);
   return `${base || "player"}-${randomBytes(3).toString("hex")}`;
+}
+
+type UserRow = { id: string; handle: string; display_name: string };
+
+/** Finds the user by email or creates them. `rename` updates an existing user's name to `rawName`. */
+export async function findOrCreateUser(email: string, rawName: unknown, rename: boolean): Promise<UserRow> {
+  let name = typeof rawName === "string" ? rawName.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+  if (/^[\d\s]+$/.test(name)) name = "";   // a pasted sign-in code, not a name
+  const user = await one<UserRow>("SELECT id, handle, display_name FROM users WHERE email = $1", [email]);
+  if (!user) {
+    const shown = name || email.split("@")[0];
+    return (await one<UserRow>("INSERT INTO users (email, display_name, handle) VALUES ($1, $2, $3) RETURNING id, handle, display_name",
+                               [email, shown, slug(shown)]))!;
+  }
+  if (rename && name && name !== user.display_name) {
+    await q("UPDATE users SET display_name = $1 WHERE id = $2", [name, user.id]);
+    user.display_name = name;
+  }
+  return user;
 }

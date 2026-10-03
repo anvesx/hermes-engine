@@ -16,12 +16,8 @@ Inside Claude Code:
 ```
 
 The same from a terminal: `claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine`,
-then start `claude` as usual. To join the company leaderboard, use your own work email, then the code it sends you:
-
-```
-/token-metrics:dashboard you@devxlabs.ai
-/token-metrics:dashboard verify <code> Your Name
-```
+then start `claude` as usual. To join the company leaderboard, run `/token-metrics:dashboard`. It joins with
+`git config --global user.email` and `user.name`, so set those to your work email and name first.
 
 To update: `/plugin marketplace update hermes-engine`, then `/plugin update token-metrics@hermes-engine` and `/reload-plugins`.
 
@@ -76,13 +72,12 @@ versions are skipped for those rows.
 One command joins, syncs and shows your results:
 
 ```
-/token-metrics:dashboard you@devxlabs.ai             # first time: emails you a 6-digit code
-/token-metrics:dashboard verify <code> <Your Name>   # joins, syncs your history, opens the dashboard
-/token-metrics:dashboard                             # every time after that: sync now and open the dashboard
+/token-metrics:dashboard                     # first time: joins with your git email and name, syncs, opens the dashboard
+/token-metrics:dashboard you@devxlabs.ai    # first time, with a different email than your git one
+/token-metrics:dashboard                     # every time after that: sync now and open the dashboard
 ```
 
-From a terminal it needs no Claude Code session and uses no tokens. The first time, it asks for your email, the emailed
-code and your name, so one run does everything:
+From a terminal it needs no Claude Code session and uses no tokens:
 
 ```bash
 python3 ~/.claude/metrics/share.py dashboard
@@ -109,7 +104,7 @@ Other commands, not needed for normal use:
 | `/token-metrics:share preview` | Exactly what syncing sends; sends nothing |
 | `/token-metrics:share card --hide spend,name` | Choose what your public card shows (`name, level, badges, streak, tokens, hours, spend`) |
 | `/token-metrics:leaderboard [week\|month\|all]` | The leaderboard as a table in the terminal |
-| `/token-metrics:join you@devxlabs.ai` | Join without opening the dashboard (then `/token-metrics:join verify <code> <Your Name>`) |
+| `/token-metrics:join [you@devxlabs.ai]` | Join without opening the dashboard; also switches the account you're joined as |
 | `/token-metrics:share leave` | Delete your data on the server and stop syncing |
 
 ## Privacy

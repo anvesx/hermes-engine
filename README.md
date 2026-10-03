@@ -11,33 +11,31 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
 ## Get started
 
-1. **Get the plugin.**
+1. **Install the plugin.** One command in a terminal:
 
    ```bash
-   git clone https://github.com/devx-commerce/hermes-engine
+   claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine
    ```
 
-2. **Start Claude Code with the plugin loaded**, then start a new session:
+   Then start a new Claude Code session. The plugin loads in every session and doesn't change your `settings.json`.
+
+2. **Make sure git knows your work email.** The plugin joins you with it, so there's no code to type:
 
    ```bash
-   claude --plugin-dir /path/to/hermes-engine/plugins/token-metrics
+   git config --global user.email   # should print you@devxlabs.ai
+   git config --global user.name    # the name shown on the leaderboard
    ```
 
-   The plugin runs alongside your own settings and doesn't change your `settings.json`.
+   If it prints something else, set it with `git config --global user.email you@devxlabs.ai`.
 
 3. **Connect your account.** In Claude Code, run:
 
    ```
-   /token-metrics:dashboard you@devxlabs.ai
+   /token-metrics:dashboard
    ```
 
-   You'll get a 6-digit code by email. Finish with:
-
-   ```
-   /token-metrics:dashboard verify <code> <Your Name>
-   ```
-
-   Your dashboard opens in the browser, already signed in, with your existing history loaded.
+   It joins with your git email and name, syncs your history and opens your dashboard in the browser, already
+   signed in. It prints who you joined as; if that's wrong, run `/token-metrics:join you@devxlabs.ai`.
 
 4. **Work as usual, and label your tasks.** Start a task with a category in brackets, and rate it when it's done:
 
@@ -56,8 +54,7 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
    It syncs your latest numbers first. Your stats also sync on their own at the end of each session, at most once an hour.
 
-You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens. The first time, it asks
-for your email, the code and your name:
+You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens:
 
 ```bash
 python3 ~/.claude/metrics/share.py dashboard
@@ -114,9 +111,13 @@ sent: tokens, spend, hours, task counts and leak shares. Prompts, code, project 
 By default, your prompt text isn't stored locally either. `/token-metrics:share leave` deletes everything the server holds about
 you. Details are in [`plugins/token-metrics/README.md`](plugins/token-metrics/README.md#privacy).
 
+Joining takes your email from git and doesn't verify it, so someone could join under a colleague's address. That's
+accepted for an internal leaderboard. The website's own sign-in page still checks you with an email code.
+
 ## Troubleshooting
 
-- **`invalid choice: 'dashboard'`:** your plugin is out of date. Pull the latest version and start a new Claude Code session.
+- **`invalid choice: 'dashboard'`:** your plugin is out of date. Run `claude plugin marketplace update hermes-engine && claude plugin update token-metrics@hermes-engine`, then start a new Claude Code session.
+- **"your git email is …":** joining uses `git config --global user.email`. Set it to your work email, or run `/token-metrics:join you@devxlabs.ai`.
 - **The dashboard shows zeros:** your stats haven't synced yet. Run `/token-metrics:dashboard` again and check that it
   prints `Synced your latest stats.`
 - **The browser shows a sign-in page or only your public card:** the sign-in link expired (it works once, for 5

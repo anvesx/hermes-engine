@@ -7,13 +7,11 @@ background at most once an hour. What is sent is exactly `python3 stats.py --jso
 and each leak category's share of spend. No prompt text, project names, file paths or session ids.
 
   python3 share.py preview                       # what would be sent; sends nothing
-  python3 share.py join you@devxlabs.ai          # emails you a 6-digit code
-  python3 share.py verify 123456 "Your Name"     # finishes joining; background sync starts
+  python3 share.py join [you@devxlabs.ai] [--name "Your Name"]
+                                                 # joins with your git email and name; background sync starts
   python3 share.py sync [--force]                # send now (the hook does this for you)
   python3 share.py me                            # points, level, rank, badges, card link
-  python3 share.py dashboard [you@devxlabs.ai | verify <code> "Your Name"]
-                                                 # join if needed, sync, open your dashboard in the browser.
-                                                 # In a terminal it prompts for the code, so one run does it all.
+  python3 share.py dashboard [you@devxlabs.ai]   # join if needed, sync, open your dashboard in the browser
   python3 share.py leaderboard [--period week|month|all]
   python3 share.py card --hide spend,name        # choose what your public card shows
   python3 share.py leave                         # delete your data on the server and stop syncing
@@ -24,6 +22,7 @@ import argparse
 import json
 import os
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -33,7 +32,7 @@ from datetime import datetime
 
 import stats
 
-CLIENT = "token-metrics/1.5.7"
+CLIENT = "token-metrics/1.6.0"
 DEFAULT_URL = "https://token-metrics-leaderboard.vercel.app"
 DOMAIN = "devxlabs.ai"
 SYNC_EVERY_S = 60 * 60
@@ -96,7 +95,7 @@ def call(cfg, method, path, body=None, auth=True):
     headers = {"Content-Type": "application/json", "User-Agent": CLIENT}
     if auth:
         if not cfg.get("token"):
-            raise Fail("not joined yet: run `share.py join you@" + DOMAIN + "`")
+            raise Fail("not joined yet: run `share.py join`")
         headers["Authorization"] = "Bearer " + cfg["token"]
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base_url(cfg) + path, data=data, headers=headers, method=method)
@@ -131,46 +130,41 @@ def cmd_preview(a, cfg):
     print(json.dumps(payload(), indent=2))
 
 
+def git_config(key):
+    """A value from the user's global git config, or "" if git or the key is missing."""
+    try:
+        r = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def cmd_join(a, cfg):
-    start_join(cfg, a.email, a.url, '/token-metrics:join verify <code> "Your Name"')
+    join(cfg, a.email, a.name, a.url)
+    show_me(load())
 
 
-def start_join(cfg, email, url, finish):
-    email = email.strip().lower()
+def join(cfg, email=None, name=None, url=None):
+    """Joins with the email and name from `git config --global`, then sends the first sync. No email code."""
+    email = (email or git_config("user.email")).strip().lower()
     if not email.endswith("@" + DOMAIN):
-        raise Fail(f"use your @{DOMAIN} work email")
+        raise Fail(f"your git email is {email or 'not set'}; join with your @{DOMAIN} work email: "
+                   f"/token-metrics:join you@{DOMAIN}  (or run: git config --global user.email you@{DOMAIN})")
+    name = (name or git_config("user.name") or email.split("@")[0]).strip()
     if url:
         cfg["url"] = url.rstrip("/")
-    call(cfg, "POST", "/api/auth/start", {"email": email}, auth=False)
-    cfg["email"] = email
-    cfg.pop("token", None)
-    save(cfg)
-    print(f"A 6-digit code is on its way to {email}.\n")
-    print("Joining shares, from now on and automatically about once an hour:")
-    print("  weekly tokens (split by type, model and subagents), daily token totals, API-equivalent spend, active hours")
-    print("  and days, session/task counts, tagged and rated task counts, model mix by spend, and each leak category's share.")
-    print("It never shares prompt text, project names, file paths or session ids.")
-    print("See the exact data with `share.py preview`. Your name and stats appear on the internal leaderboard;")
-    print(f"your public card shows {', '.join(CARD_FIELDS)} until you hide some with `share.py card --hide ...`.\n")
-    print(f"To agree and finish: {finish}")
-
-
-def cmd_verify(a, cfg):
-    verify(cfg, a.code, a.name)
-    show_me(cfg)
-
-
-def verify(cfg, code, name_parts):
-    """Finishes joining with the emailed code, then sends the first sync."""
-    if not cfg.get("email"):
-        raise Fail("run `share.py join you@" + DOMAIN + "` first")
-    name = " ".join(name_parts).strip().strip("\"'").strip() or cfg["email"].split("@")[0]
-    r = call(cfg, "POST", "/api/auth/verify", {"email": cfg["email"], "code": code.strip(), "display_name": name},
-             auth=False)
-    cfg.update(token=r["token"], handle=r.get("handle"), display_name=name,
+    r = call(cfg, "POST", "/api/auth/claim", {"email": email, "display_name": name}, auth=False)
+    name = r.get("display_name") or name
+    cfg.update(email=email, token=r["token"], handle=r.get("handle"), display_name=name,
                consent_at=datetime.now().astimezone().isoformat(timespec="seconds"), last_sync=0)
     save(cfg)
-    print(f"Joined as {name}. Sending your first sync...")
+    print(f"Joined as {name} ({email}). Not you? Run /token-metrics:join you@{DOMAIN}\n")
+    print("From now on, about once an hour, this shares:")
+    print("  weekly tokens (split by type, model and subagents), daily token totals, API-equivalent spend, active hours")
+    print("  and days, session/task counts, tagged and rated task counts, model mix by spend, and each leak category's share.")
+    print("It never shares prompt text, project names, file paths or session ids. See the exact data with `share.py preview`;")
+    print("stop and delete everything with /token-metrics:share leave.\n")
+    print("Sending your first sync...")
     try:
         sync(cfg, force=True)
     except Fail as e:
@@ -244,27 +238,10 @@ def cmd_me(a, cfg):
 def cmd_dashboard(a, cfg):
     args = a.args
     if args and args[0] == "verify":
-        if len(args) < 2:
-            raise Fail('usage: /token-metrics:dashboard verify <code> "Your Name"')
-        verify(cfg, args[1], args[2:])
+        raise Fail("email codes are no longer needed: run /token-metrics:dashboard")
+    if not cfg.get("token"):
+        join(cfg, args[0] if args else None)
         cfg = load()
-    elif not cfg.get("token"):
-        if sys.stdin.isatty():
-            join_interactively(cfg, args[0] if args else None)
-            cfg = load()
-        elif args and "@" in args[0]:
-            start_join(cfg, args[0], None, '/token-metrics:dashboard verify <code> "Your Name"')
-            return
-        else:
-            # a first run from the slash command: no terminal to prompt in, so explain the steps
-            # and exit 0 (a non-zero exit shows up in Claude Code as "Shell command failed")
-            print("Welcome to token-metrics! You haven't joined the leaderboard yet. Two steps:\n")
-            print(f"  1. /token-metrics:dashboard <your work email>      e.g. /token-metrics:dashboard jane@{DOMAIN}")
-            print("     This emails you a 6-digit code.")
-            print('  2. /token-metrics:dashboard verify <code> <Your Name>')
-            print("     This joins, syncs your history and opens your dashboard.\n")
-            print("Nothing is shared until step 2.")
-            return
     else:
         try:
             print("Synced your latest stats." if sync(cfg, force=True) else "Another sync is running; showing the last one.")
@@ -272,45 +249,6 @@ def cmd_dashboard(a, cfg):
             print(f"Sync failed ({e}); showing your last synced stats.")
     me = show_me(cfg)
     open_dashboard(cfg, me)
-
-
-def ask(prompt, default=""):
-    try:
-        answer = input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        raise Fail("cancelled")
-    return answer or default
-
-
-def join_interactively(cfg, email):
-    """Terminal only: request the code, then prompt for it, so one run joins, syncs and opens the dashboard."""
-    email = email or ask(f"Work email (@{DOMAIN}): ")
-    start_join(cfg, email, None, "enter the code below.")
-    cfg = load()
-    # the code first: it's what people type right after "a code is on its way"
-    code = ask_code()
-    default = cfg["email"].split("@")[0]
-    name = ask(f"Name to show on the board [{default}]: ", default)
-    while name.replace(" ", "").isdigit():
-        name = ask(f"That looks like a number, not a name. Name to show on the board [{default}]: ", default)
-    for attempt in range(3):
-        try:
-            verify(cfg, code, [name])
-            return
-        except Fail as e:
-            if "wrong code" not in str(e) or attempt == 2:
-                raise
-            print(f"{e}; try again.")
-            code = ask_code()
-
-
-def ask_code():
-    while True:
-        code = ask("6-digit code from the email: ").replace(" ", "")
-        if code.isdigit() and len(code) == 6:
-            return code
-        print("The code is the 6 digits from the email.")
 
 
 def open_dashboard(cfg, me):
@@ -370,17 +308,15 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("preview")
     p = sub.add_parser("join")
-    p.add_argument("email")
+    p.add_argument("email", nargs="?", help="defaults to `git config --global user.email`")
+    p.add_argument("--name", help="defaults to `git config --global user.name`")
     p.add_argument("--url", help="leaderboard URL (else CC_METRICS_SHARE_URL)")
-    p = sub.add_parser("verify")
-    p.add_argument("code")
-    p.add_argument("name", nargs="*")
     p = sub.add_parser("sync")
     p.add_argument("--force", action="store_true")
     p.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("me")
     p = sub.add_parser("dashboard")
-    p.add_argument("args", nargs="*", help='you@devxlabs.ai to join, or: verify <code> "Your Name"')
+    p.add_argument("args", nargs="*", help="you@devxlabs.ai to join with, else your git email")
     p = sub.add_parser("leaderboard")
     p.add_argument("--period", choices=["week", "month", "all"], default="week")
     p.add_argument("--top", type=int, default=15)

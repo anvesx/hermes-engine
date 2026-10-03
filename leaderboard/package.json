@@ -6,6 +6,7 @@
     "build": "next build",
     "start": "next start",
     "db:init": "node scripts/db-init.mjs",
+    "deploy": "node scripts/deploy.mjs",
     "categories": "python3 scripts/export_categories.py > lib/categories.json",
     "typecheck": "tsc --noEmit"
   },

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { type Period, publicBase } from "@/lib/board";
 import type { Dashboard as Data } from "@/lib/dashboard";
 import { compact, hours, money, pct } from "@/lib/format";
+import { cardPath, cardVersion } from "@/lib/profile";
 import { LEVELS, RULES } from "@/lib/score";
 import { PointsBars, ShareBars, SplitBar, WasteLine, WeekBars, dayLabel } from "./charts";
 
@@ -245,7 +246,7 @@ export function Dashboard({ data, handle }: { data: Data; handle: string }) {
       <h2>Your public card</h2>
       <div className="grid2">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={`/u/${handle}/card.png`} alt="Your public stats card" className="card-img" />
+        <img src={cardPath(handle, cardVersion(player))} alt="Your public stats card" className="card-img" />
         <div className="panel">
           <p style={{ marginTop: 0 }}>Anyone with this link sees only the card, not this dashboard:</p>
           <p><a href={`/u/${handle}?public=1`}><code>{`${publicBase()}/u/${handle}`}</code></a></p>

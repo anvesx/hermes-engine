@@ -4,7 +4,7 @@ import { currentUser } from "@/lib/auth";
 import { publicBase } from "@/lib/board";
 import { dashboardFor } from "@/lib/dashboard";
 import { compact, hours, money } from "@/lib/format";
-import { publicProfile } from "@/lib/profile";
+import { cardPath, publicProfile } from "@/lib/profile";
 import { Dashboard } from "./dashboard";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const title = `${p.name ?? "A Claude Code user"}${p.level ? ` · Level ${p.level.level} ${p.level.title}` : ""}`;
   const bits = [p.tokens !== null && `${compact(p.tokens)} tokens`, p.hours !== null && `${hours(p.hours)} in Claude Code`,
                 p.badges && `${p.badges.length} badges`].filter(Boolean).join(" · ");
-  const image = `${publicBase()}/u/${handle}/card.png`;
+  const image = `${publicBase()}${cardPath(handle, p.version)}`;
   return {
     title, description: bits,
     openGraph: { title, description: bits, images: [{ url: image, width: 1200, height: 630 }] },
@@ -40,7 +40,7 @@ export default async function Profile({ params, searchParams }: Props) {
   return (
     <main style={{ maxWidth: 760 }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={`/u/${handle}/card.png`} alt="Claude Code stats card" style={{ width: "100%", borderRadius: 12, border: "1px solid var(--line)" }} />
+      <img src={cardPath(handle, p.version)} alt="Claude Code stats card" style={{ width: "100%", borderRadius: 12, border: "1px solid var(--line)" }} />
       <div className="panel stats" style={{ marginTop: 16 }}>
         {p.level && <div className="stat"><span className="muted">Level {p.level.level}</span><b>{p.level.title}</b></div>}
         {p.streak && <div className="stat"><span className="muted">Streak</span><b>{p.streak.current} weeks</b></div>}

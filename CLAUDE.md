@@ -41,6 +41,8 @@ CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins
 npm run typecheck && npm run build
 ```
 
+Deploy production with `cd leaderboard && npm run deploy`. It typechecks, applies `db/schema.sql` to the production database (pulled with `vercel env pull`), then runs `vercel --prod`. Never run a bare `vercel --prod`: code that needs a new table or column would fail until `db:init` runs.
+
 ## Architecture
 
 **Data flow.** `hooks/hooks.json` points every hook event (SessionStart, UserPromptSubmit, Pre/PostToolUse, PostToolUseFailure, PreCompact, Stop, SessionEnd) at one script, `metrics_hook.py`. The hook appends one JSON line per event to `events.jsonl`. The report scripts read that file together with the transcripts Claude Code already writes, so most leaks are detected from existing history with no hook data. Hook data adds the extras: task categories, ratings and idle detection.
@@ -82,7 +84,7 @@ Detectors call `add_finding(...)` / `add(...)`:
 - Volume (tokens, spend, hours) earns cosmetic badges but never points.
 - Auth works by email code. `/api/auth/verify` issues a token per sign-in; CLI tokens go in the Bearer header, web tokens in the `tm_session` cookie. Only SHA-256 hashes of tokens and codes are stored.
 - Public pages are `/u/[handle]` and `/u/[handle]/card.png`, which renders with `next/og`. They show only the fields enabled in the user's `card_fields`. Everything else requires sign-in. `/admin` is limited to `ADMIN_EMAILS`.
-- `/u/[handle]` doubles as the owner's dashboard: signed in as that user (and without `?public=1`), it renders `app/u/[handle]/dashboard.tsx` from `lib/dashboard.ts` instead of the public card. `/token-metrics:dashboard` (`share.py dashboard`) gets there by calling `POST /api/auth/link`, which returns a single-use, 5-minute link; `GET /api/auth/link?t=…` spends it, sets the web session cookie and redirects. Links live in the `login_links` table, so rerun `npm run db:init` after deploying.
+- `/u/[handle]` doubles as the owner's dashboard: signed in as that user (and without `?public=1`), it renders `app/u/[handle]/dashboard.tsx` from `lib/dashboard.ts` instead of the public card. `/token-metrics:dashboard` (`share.py dashboard`) gets there by calling `POST /api/auth/link`, which returns a single-use, 5-minute link; `GET /api/auth/link?t=…` spends it, sets the web session cookie and redirects. Links live in the `login_links` table.
 
 **Cost model.** Per-call token counts come from transcript `usage` and are exact. The size of individual items is estimated at 4 chars/token; images use their pixel dimensions. A leaked item is charged at the cache-read price on every later call that re-reads it, until the next compaction. Prices are API list prices.
 

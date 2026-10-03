@@ -4,7 +4,7 @@ import { publicProfile } from "@/lib/profile";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(_: Request, { params }: { params: Promise<{ handle: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ handle: string }> }) {
   const { handle } = await params;
   const p = await publicProfile(handle);
   if (!p) return new Response("not found", { status: 404 });
@@ -42,6 +42,9 @@ export async function GET(_: Request, { params }: { params: Promise<{ handle: st
         </div>
       </div>
     ),
-    { width: 1200, height: 630, headers: { "Cache-Control": "public, max-age=600" } },
+    // a versioned URL (?v= the card's current version) never changes, so it can be cached for good;
+    // the bare URL, and any stale version, must be re-rendered almost every time
+    { width: 1200, height: 630, headers: { "Cache-Control": new URL(req.url).searchParams.get("v") === p.version
+        ? "public, max-age=31536000, immutable" : "public, max-age=0, s-maxage=60, must-revalidate" } },
   );
 }

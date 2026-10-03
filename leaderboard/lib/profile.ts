@@ -1,4 +1,5 @@
-import { loadPlayers } from "./board";
+import { createHash } from "node:crypto";
+import { type Player, loadPlayers } from "./board";
 
 /** A player's public view: only the fields they enabled for their card. */
 export async function publicProfile(handle: string) {
@@ -8,6 +9,7 @@ export async function publicProfile(handle: string) {
   const f = { name: true, level: true, badges: true, streak: true, tokens: true, hours: true, spend: true, ...pl.user.card_fields };
   const p = pl.profile;
   return {
+    version: cardVersion(pl),
     name: f.name ? pl.user.display_name : null,
     level: f.level ? p.level : null,
     badges: f.badges ? p.badges : null,
@@ -17,3 +19,14 @@ export async function publicProfile(handle: string) {
     spend: f.spend ? p.volume.cost_usd : null,
   };
 }
+
+/**
+ * Changes whenever anything on the card can change (a sync, a rename, hidden fields), so the card URL can carry it:
+ * a new image is a new URL, and CDNs and link previews can cache each one for as long as they like.
+ */
+export function cardVersion(pl: Player) {
+  const key = JSON.stringify([pl.last_sync_at, pl.user.display_name, pl.user.card_fields]);
+  return createHash("sha256").update(key).digest("hex").slice(0, 10);
+}
+
+export const cardPath = (handle: string, version: string) => `/u/${handle}/card.png?v=${version}`;

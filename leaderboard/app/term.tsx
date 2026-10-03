@@ -13,10 +13,15 @@ const GLYPHS: Record<string, string[]> = {
   $: ["011", "110", "010", "011", "110"], h: ["100", "100", "110", "101", "101"],
 };
 
+/** Text as five rows of "1"/"0" pixels, one blank column between glyphs. Also used by the card image. */
+export function glyphRows(text: string) {
+  const chars = [...text].filter((c) => GLYPHS[c]);
+  return [0, 1, 2, 3, 4].map((r) => chars.map((c) => GLYPHS[c][r]).join("0"));
+}
+
 /** Big text as a 5-row pixel grid. Drawn with cells, not block characters, which most web font subsets lack. */
 export function Figlet({ text }: { text: string }) {
-  const chars = [...text].filter((c) => GLYPHS[c]);
-  const rows = [0, 1, 2, 3, 4].map((r) => chars.map((c) => GLYPHS[c][r]).join("0"));
+  const rows = glyphRows(text);
   return (
     <div className="figlet" role="img" aria-label={text} style={{ gridTemplateColumns: `repeat(${rows[0].length}, var(--px))` }}>
       {rows.flatMap((row, r) => [...row].map((on, c) => <i key={`${r}-${c}`} className={on === "1" ? "on" : ""} />))}

@@ -6,6 +6,7 @@ import { dashboardFor } from "@/lib/dashboard";
 import { compact, hours, money } from "@/lib/format";
 import { cardPath, publicProfile } from "@/lib/profile";
 import { Dashboard } from "./dashboard";
+import { PublicCard } from "./public";
 
 export const dynamic = "force-dynamic";
 type Props = { params: Promise<{ handle: string }>; searchParams: Promise<{ period?: string; public?: string }> };
@@ -37,27 +38,5 @@ export default async function Profile({ params, searchParams }: Props) {
   }
   const p = await publicProfile(handle);
   if (!p) notFound();
-  return (
-    <main style={{ maxWidth: 760 }}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={cardPath(handle, p.version)} alt="Claude Code stats card" style={{ width: "100%", borderRadius: 12, border: "1px solid var(--line)" }} />
-      <div className="panel stats" style={{ marginTop: 16 }}>
-        {p.level && <div className="stat"><span className="muted">Level {p.level.level}</span><b>{p.level.title}</b></div>}
-        {p.streak && <div className="stat"><span className="muted">Streak</span><b>{p.streak.current} weeks</b></div>}
-        {p.tokens !== null && <div className="stat"><span className="muted">Tokens</span><b>{compact(p.tokens)}</b></div>}
-        {p.hours !== null && <div className="stat"><span className="muted">Active</span><b>{hours(p.hours)}</b></div>}
-        {p.spend !== null && <div className="stat"><span className="muted">API-equivalent</span><b>{money(p.spend)}</b></div>}
-      </div>
-      {p.badges && p.badges.length > 0 && (
-        <>
-          <h2>Badges</h2>
-          <div className="row">{p.badges.map((b) => <span key={b.id} className="pill" title={b.description}>{b.name}</span>)}</div>
-        </>
-      )}
-      <p className="muted" style={{ marginTop: 32 }}>
-        Measured with the token-metrics plugin for Claude Code.
-        {user?.handle === handle && <> This is what others see. <a href={`/u/${handle}`}>Back to your dashboard</a></>}
-      </p>
-    </main>
-  );
+  return <PublicCard p={p} handle={handle} isOwner={user?.handle === handle} url={`${publicBase()}/u/${handle}`} />;
 }

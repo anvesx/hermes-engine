@@ -243,6 +243,8 @@ body:has(.dash) { background: radial-gradient(1200px 600px at 50% -10%, #12261a 
 .dash .ps1.root, .dash .arrow.root { color: var(--t-red); }
 .dash .term-foot a { color: inherit; text-decoration: none; }
 .dash .quiet p { margin: 4px 0; }
+/* public card: only the fields the player shows, so the stat strip has 0-4 cells */
+.public .term-stats { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
 .filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 16px; padding: 10px 14px;
           background: var(--t-panel); border: 1px solid var(--t-line); border-radius: 6px; font-size: 13px; }
 .filter label { color: var(--t-fg); }

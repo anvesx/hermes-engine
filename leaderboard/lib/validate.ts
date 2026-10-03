@@ -107,11 +107,12 @@ export function parsePayload(raw: unknown): Payload {
     if (p.schema !== 1) throw new Invalid("unsupported schema; update the plugin");
     if (!Array.isArray(p.weeks) || p.weeks.length > 60) throw new Invalid("weeks must be a list of at most 60");
     const latest = shiftWeek(weekKey(new Date()), 1);   // clients a timezone ahead may be in next week
+    const earliest = shiftWeek(weekKey(new Date()), -60);  // clients send their last 8 weeks; older keys are fake
     const seen = new Set<string>();
     const weeks = p.weeks.map((w) => {
       if (!w || typeof w !== "object") throw new Invalid("bad week");
       const r = w as Record<string, unknown>;
-      if (!isWeekKey(r.week) || r.week > latest || seen.has(r.week)) throw new Invalid("bad week key");
+      if (!isWeekKey(r.week) || r.week > latest || r.week < earliest || seen.has(r.week)) throw new Invalid("bad week key");
       seen.add(r.week);
       return { week: r.week, ...block(r, 1, `week ${r.week}`) };
     });

@@ -1,23 +1,35 @@
 // A second lock on /admin: on top of ADMIN_EMAILS, the admin pages ask for a shared password once per browser.
-// The cookie holds a hash of the password, never the password, so changing the password signs everyone out.
+// The password comes from the ADMIN_PASSWORD environment variable and is never stored in the repo; without it,
+// /admin stays locked. The cookie is an HMAC (keyed by the password) over the admin's user id and an expiry, so it
+// works for one admin only, expires on its own, and changing the password signs everyone out.
+import { createHmac } from "node:crypto";
 import { cookies } from "next/headers";
-import { sameHash, sha256 } from "./auth";
+import { currentUser, sameHash, sha256 } from "./auth";
 
-export const ADMIN_PASSWORD = "Admin12@#";
 export const ADMIN_COOKIE = "tm_admin";
 export const ADMIN_TTL_S = 12 * 3600;
 
-const unlockValue = () => sha256(`tm-admin:${ADMIN_PASSWORD}`);
+const password = () => process.env.ADMIN_PASSWORD || "";
 
-export const passwordOk = (raw: unknown) => typeof raw === "string" && sameHash(sha256(raw), sha256(ADMIN_PASSWORD));
-
-export async function adminUnlocked() {
-  const v = (await cookies()).get(ADMIN_COOKIE)?.value;
-  return !!v && sameHash(v, unlockValue());
+function sign(userId: string, exp: number) {
+  return createHmac("sha256", `tm-admin:${password()}`).update(`${userId}.${exp}`).digest("hex");
 }
 
-export async function unlockAdmin() {
-  (await cookies()).set(ADMIN_COOKIE, unlockValue(), {
+export const passwordOk = (raw: unknown) =>
+  !!password() && typeof raw === "string" && sameHash(sha256(raw), sha256(password()));
+
+export async function adminUnlocked() {
+  if (!password()) return false;
+  const user = await currentUser();
+  const v = (await cookies()).get(ADMIN_COOKIE)?.value;
+  if (!user || !v) return false;
+  const [id, exp, mac] = v.split(".");
+  return id === String(user.id) && Number(exp) > Date.now() / 1000 && !!mac && sameHash(mac, sign(id, Number(exp)));
+}
+
+export async function unlockAdmin(userId: string) {
+  const exp = Math.floor(Date.now() / 1000) + ADMIN_TTL_S;
+  (await cookies()).set(ADMIN_COOKIE, `${userId}.${exp}.${sign(userId, exp)}`, {
     httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: ADMIN_TTL_S,
   });
 }

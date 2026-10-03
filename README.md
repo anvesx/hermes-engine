@@ -11,21 +11,21 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
 ## Get started
 
-1. **Install the plugin.** One command in a terminal:
-
-   ```bash
-   claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine
-   ```
-
-   Then start a new Claude Code session. The plugin loads in every session and doesn't change your `settings.json`.
-
-   Or, from inside a Claude Code session:
+1. **Install the plugin.** In a Claude Code session:
 
    ```
    /plugin marketplace add anvesx/hermes-engine
    /plugin install token-metrics@hermes-engine
    /reload-plugins
    ```
+
+   Or with one command in a terminal, then start a new Claude Code session:
+
+   ```bash
+   claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine
+   ```
+
+   The plugin loads in every session and doesn't change your `settings.json`.
 
 2. **Make sure git knows your work email.** The plugin joins you with it, so there's no code to type:
 

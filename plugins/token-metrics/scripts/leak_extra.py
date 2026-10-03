@@ -249,7 +249,6 @@ def analyse(s, tasks, add, price):
     if not calls:
         return
     first_ctx = calls[0]["ctx"]
-    wm = s.write_mult
 
     def out_cost(c, tokens):
         return tokens * price(c["model"])[1] / 1e6
@@ -296,17 +295,17 @@ def analyse(s, tasks, add, price):
     for stream in streams:
         for i, c in enumerate(stream):
             pi, _, pr = price(c["model"])
-            premium += c["cw"] * pi * (wm - 1) / 1e6
+            premium += c["cw"] * pi * (c["wmult"] - 1) / 1e6
             if c["in"] > UNCACHED_MIN:
                 uncached, n_uncached = uncached + c["in"] * (pi - pr) / 1e6, n_uncached + 1
             elif c["cw"] == c["cr"] == 0 and c["in"] and c["ctx"] < min_cacheable(c["model"]):
                 below, n_below = below + c["in"] * (pi - pr) / 1e6, n_below + 1
             if i == 0:
-                cold += c["cw"] * pi * wm / 1e6
+                cold += c["cw"] * pi * c["wmult"] / 1e6
             if c["cw"] > 1_000:
                 nxt = stream[i + 1] if i + 1 < len(stream) else None
                 if not (nxt and nxt["t"] - c["t"] < s.ttl_s and nxt["cr"]):
-                    unused, n_unused = unused + c["cw"] * pi * (wm - 1) / 1e6, n_unused + 1
+                    unused, n_unused = unused + c["cw"] * pi * (c["wmult"] - 1) / 1e6, n_unused + 1
     if n_uncached:
         add(lid(21), uncached, f"{n_uncached} calls with {UNCACHED_MIN:,}+ uncached input tokens")
     if n_below:
@@ -323,7 +322,7 @@ def analyse(s, tasks, add, price):
     for prev, c in zip(starts, starts[1:]):
         if c["t"] - prev["t"] <= CONCURRENT_S and c["cw"] > 5_000 and prev["cw"] > 5_000:
             pi, _, pr = price(c["model"])
-            add(lid(34), c["cw"] * (pi * wm - pr) / 1e6, f"helper agent wrote ~{c['cw']:,} tokens of cache at the same moment as a sibling")
+            add(lid(34), c["cw"] * (pi * c["wmult"] - pr) / 1e6, f"helper agent wrote ~{c['cw']:,} tokens of cache at the same moment as a sibling")
 
     # A45 Replanning after every minor update: plan/todo updates per task beyond the limit
     for tsk in tasks:
@@ -548,7 +547,7 @@ def analyse(s, tasks, add, price):
     for a in sorted(s.agents.values(), key=lambda a: a[0]["t"])[1:]:
         c = a[0]
         pi, _, pr = price(c["model"])
-        add(lid(125), (c["in"] * pi + c["cw"] * pi * wm + c["cr"] * pr) / 1e6, f"helper agent startup ~{c['ctx']:,} tokens")
+        add(lid(125), (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr) / 1e6, f"helper agent startup ~{c['ctx']:,} tokens")
     for p in s.prompts:
         if p["text"].lstrip().startswith(COORDINATION):
             add(lid(126), s.carry(p["t"], p["tokens"]), "message from another agent")

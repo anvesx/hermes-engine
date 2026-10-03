@@ -26,6 +26,7 @@ python3 ~/.claude/metrics/analyze.py --csv tasks.csv
 The scripts are copied to `~/.claude/metrics/` at the start of each session, so this path stays
 valid after plugin updates. Add `--all` to the leak report for the full canvas list (core leaks plus all
 additional categories), `--all --core` for the core leaks only, and `--ttl 5m` if you use an API key or usage credits.
+Costs use API list prices for each model version, and cache writes are priced by the lifetime the transcript records.
 
 Newer Claude Code versions record the loaded tool definitions, skill listings and CLAUDE.md files in the
 transcript, so the report can show which MCP servers and skills you load but never use. Sessions from older

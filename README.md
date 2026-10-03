@@ -134,7 +134,7 @@ you. Details are in [`plugins/token-metrics/README.md`](plugins/token-metrics/RE
 |---|---|
 | `--days N` | Only the last N days |
 | `--since YYYY-MM-DD` | Only from this date (instead of `--days`) |
-| `--ttl 5m` | Use if you are on an API key or usage credits (5-minute cache). The default `1h` is for subscriptions |
+| `--ttl 5m` | Use if you are on an API key or usage credits (5-minute cache). The default `1h` is for subscriptions. Cache writes are priced by the lifetime the transcript records; this is the fallback and sets break detection |
 | `--all` | Full canvas list (core leaks and all additional categories) instead of the 50 curated categories |
 | `--all --core` | Core leaks only |
 | `--top N` | Examples shown per leak |

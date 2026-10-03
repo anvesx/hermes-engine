@@ -32,6 +32,10 @@ The scripts are copied to `~/.claude/metrics/` at the start of each session, so 
 valid after plugin updates. Add `--all` to the leak report for the full canvas list (core leaks plus all
 additional categories), `--all --core` for the core leaks only, and `--ttl 5m` if you use an API key or usage credits.
 
+Newer Claude Code versions record the loaded tool definitions, skill listings and CLAUDE.md files in the
+transcript, so the report can show which MCP servers and skills you load but never use. Sessions from older
+versions are skipped for those rows.
+
 ## Leaderboard
 
 After you join, each session end syncs your stats in the background, at most once an hour. Points come from

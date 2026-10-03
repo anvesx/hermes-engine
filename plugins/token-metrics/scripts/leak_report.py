@@ -106,10 +106,11 @@ LEAKS = {
 }
 PARENT = {23: 4, 24: 4, 25: 4}
 SPEND_NOT_WASTE = {4, 15}   # reported as spend to review, not counted as pure waste
-NOT_MEASURED = {   # transcripts don't record what was loaded, only what was used
-    12: "not measured yet: needs the loaded tool definitions (part of #1)",
-    13: "not measured yet: needs the loaded skill listings (part of #1)",
+NOT_RECORDED = {   # older Claude Code versions don't record what was loaded, only what was used
+    12: "needs the loaded tool definitions, which only newer Claude Code versions record (part of #1)",
+    13: "needs the loaded skill listings, which only newer Claude Code versions record (part of #1)",
 }
+EFFORT_CMD = re.compile(r"<command-name>/effort</command-name>")
 
 
 def tok(chars):
@@ -237,6 +238,7 @@ class Session:
         self.helper_tool_uses, self.helper_results = {}, []
         self.compactions, self.summaries = [], []
         self.interrupts, self.uuids = [], set()
+        self.attachments, self.skill_bodies = [], []   # what Claude Code injected: (t, attachment, rendered chars)
         self._parse(entries)
         self._segments()
 
@@ -260,6 +262,10 @@ class Session:
             content = msg.get("content")
             if not e["_helper"] and e.get("uuid"):
                 self.uuids.add(e["uuid"])
+            if e.get("type") == "attachment":
+                if not e["_helper"] and isinstance(e.get("attachment"), dict):
+                    self.attachments.append((e["_t"], e["attachment"], len(str(e.get("rendered") or ""))))
+                continue
             if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
                 if not e["_helper"]:
                     boundaries.append(e["_t"])
@@ -289,6 +295,9 @@ class Session:
                     for b in content:
                         if isinstance(b, dict) and b.get("type") == "tool_result":
                             (self.helper_results if e["_helper"] else self.results).append(self._result(e, b))
+                elif e.get("isMeta") and e.get("sourceToolUseID"):   # an invoked skill's body
+                    if not e["_helper"]:
+                        self.skill_bodies.append({"t": e["_t"], "id": e["sourceToolUseID"], "tokens": tok(text_len(content))})
                 elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
                     docs = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "document") if isinstance(content, list) else 0
@@ -332,6 +341,39 @@ class Session:
         for c in self.calls:
             self.prefix_read.append(self.prefix_read[-1] + c["read_price"])
         self.comp_sorted = sorted(self.compactions)
+        self.prefix_events = self._prefix_events()
+
+    def _prefix_events(self):
+        """Recorded changes to the cached prefix, as (time, cause, finding key), to explain cache rewrites."""
+        out, tools, system, org = [], None, None, None
+        for t, a, _ in self.attachments:
+            kind = a.get("type")
+            if kind == "prompt_snapshot":
+                if a.get("tools"):
+                    sig = [hashlib.md5(json.dumps(x, sort_keys=True).encode()).hexdigest() for x in a["tools"]]
+                    if tools is not None and sig != tools:
+                        out.append((t, "tool order changed", lid(29)) if sorted(sig) == sorted(tools)
+                                   else (t, "tool definitions changed", lid(27)))
+                    tools = sig
+                if a.get("systemPrompt"):
+                    text = json.dumps(a["systemPrompt"])
+                    if system is not None and text != system:
+                        out.append((t, "timestamp in the system prompt changed", lid(25))
+                                   if re.sub(r"\d", "#", text) == re.sub(r"\d", "#", system)
+                                   else (t, "system prompt changed", lid(26)))
+                    system = text
+            elif kind == "credential_org":
+                if org is not None and a.get("organizationUuid") != org:
+                    out.append((t, "switched organization (separate cache)", lid(40)))
+                org = a.get("organizationUuid")
+        out += [(p["t"], "effort changed", lid(38)) for p in self.prompts if EFFORT_CMD.search(p["text"])]
+        return sorted(out, key=lambda x: x[0])
+
+    def read_span(self, t0, t1):
+        """Cache-read price summed over the main calls after t0 and before t1."""
+        i = bisect.bisect_right(self.call_times, t0)
+        j = bisect.bisect_left(self.call_times, t1)
+        return self.prefix_read[j] - self.prefix_read[i] if j > i else 0.0
 
     def carry(self, t, tokens, until=None):
         """Cost of re-reading `tokens` on every main call after time t, until compaction or `until`."""
@@ -436,7 +478,10 @@ def analyse(s: Session, findings):
             elif gap >= s.ttl_s:
                 cause = f"break of {gap / 60:.0f} min (past cache lifetime)"
             else:
-                cause = "context changed (tools, instructions, settings)"
+                event = next((x for x in s.prefix_events if prev["t"] < x[0] <= c["t"]), None)
+                cause = event[1] if event else "context changed (tools, instructions, settings)"
+                if event:
+                    add(event[2], premium, f"~{c['cw']:,} tokens rewritten, {cause}")
             add(3, premium, f"~{c['cw']:,} tokens rewritten, {cause}")
     for x, cc in compaction.items():
         k = bisect.bisect_left(s.call_times, x) - 1
@@ -578,6 +623,48 @@ def analyse(s: Session, findings):
                     add(10, cost, "turn started without a typed prompt (scheduled task, loop or background message)")
         findings["_hook_sessions"].append(s.sid)
 
+    # 12. MCP tool schema bloat: definitions of MCP tools the session never called, on every call
+    used = {u["name"] for u in list(s.tool_uses.values()) + list(s.helper_tool_uses.values())}
+    snaps = [(t, a["tools"]) for t, a, _ in s.attachments if a.get("type") == "prompt_snapshot" and a.get("tools")]
+    if snaps:
+        findings["_snapshot_sessions"].append(s.sid)
+        findings["_mcp_tokens"].append(sum(tok(len(json.dumps(x))) for x in snaps[0][1]
+                                           if str(x.get("name", "")).startswith("mcp__")))
+    for k, (t, tools) in enumerate(snaps):
+        end = snaps[k + 1][0] if k + 1 < len(snaps) else float("inf")
+        servers = defaultdict(lambda: [0, 0, 0])   # server: [tools, unused tools, unused tokens]
+        for x in tools:
+            name = str(x.get("name", ""))
+            if name.startswith("mcp__"):
+                srv = servers[name.split("__")[1]]
+                srv[0] += 1
+                if name not in used:
+                    srv[1] += 1
+                    srv[2] += tok(len(json.dumps(x)))
+        for server, (n, unused, tokens) in servers.items():
+            if unused:
+                add(12, tokens * s.read_span(t, end),
+                    f"{server}: {unused}/{n} tools never called, ~{tokens:,} tokens of definitions on every call")
+
+    # 13. Unused skills/plugins: listed skills and agent types the session never invoked
+    invoked = {str(u["input"].get("skill", "")).lstrip("/") for u in s.tool_uses.values() if u["name"] == "Skill"}
+    invoked |= {m for p in s.prompts for m in re.findall(r"<command-name>/([\w:.-]+)</command-name>", p["text"])}
+    agent_types = {str(u["input"].get("subagent_type", "")) for u in list(s.tool_uses.values()) + list(s.helper_tool_uses.values())
+                   if u["name"] in AGENT_TOOLS}
+    for t, a, _ in s.attachments:
+        if a.get("type") == "skill_listing":
+            entries = re.split(r"\n(?=- )", a.get("content", ""))
+            unused = [x for x in entries if x[2:].split(":", 1)[0] not in invoked]
+            findings["_listing_sessions"].append(s.sid)
+            if unused:
+                add(13, s.carry(t, tok(sum(map(len, unused)))),
+                    f"{len(unused)}/{len(entries)} listed skills never invoked (~{tok(sum(map(len, unused))):,} tokens)")
+        elif a.get("type") == "agent_listing_delta":
+            unused = [l for l in a.get("addedLines") or [] if l[2:].split(":", 1)[0] not in agent_types]
+            if unused:
+                add(13, s.carry(t, tok(sum(map(len, unused)))),
+                    f"{len(unused)} listed agent types never used (~{tok(sum(map(len, unused))):,} tokens)")
+
     # 18. High effort on trivial turns: a turn answered in one short reply with no tool calls,
     # whose output tokens (which include reasoning) far exceed the reply itself
     prompt_times = [p["t"] for p in s.prompts]
@@ -669,8 +756,8 @@ def cross_session(findings):
 
 def unmeasurable(k, findings):
     """Why leak k can't be costed from this data, or None. Shown instead of a misleading $0.00."""
-    if k in NOT_MEASURED:
-        return NOT_MEASURED[k]
+    if k == 12 and not findings["_snapshot_sessions"] or k == 13 and not findings["_listing_sessions"]:
+        return NOT_RECORDED[k]
     if k == 10 and not findings["_hook_sessions"]:
         return "unmeasurable without hook data (see #11)"
     if k == 11:
@@ -681,6 +768,13 @@ def unmeasurable(k, findings):
 def note_for(k, findings, total, sessions):
     if k in PARENT:
         return f"part of #{PARENT[k]}"
+    if k == 12:
+        have = len(findings["_snapshot_sessions"])
+        mcp = findings["_mcp_tokens"]
+        return (f"part of #1; {have}/{len(sessions)} sessions record their tools, median ~{int(statistics.median(mcp)):,} "
+                "tokens of MCP definitions per session") if mcp else "part of #1"
+    if k == 13:
+        return "part of #1"
     if k == 4:
         return "spend to review, not all waste"
     if k == 15:

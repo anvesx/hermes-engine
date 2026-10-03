@@ -4,7 +4,8 @@ leak_extra.py - the "Additional categories" section of the team's Leak Categorie
 
 leak_report.py ranks the core leaks (1-22, 4a-4c) and imports this module for the canvas's
 other 109 categories, labelled A<n> with their canvas row number. Each one is either
-  measured       detected from transcripts by analyse() or cross_session() below
+  measured       detected from transcripts by analyse() or cross_session() below, including the
+                 attachments Claude Code records (instructions, skill listings, prompt snapshots)
   same as #x     the same signal as a core leak, shown once there (SAME_AS)
   unmeasurable   needs data transcripts don't have; reported with the reason instead of $0.00
 
@@ -14,6 +15,7 @@ that re-reads it, at the cache-read price, until the next compaction.
 import bisect
 import hashlib
 import json
+import os
 import re
 from collections import defaultdict
 
@@ -40,6 +42,14 @@ IMAGE_BIG, IMAGE_KEEP = 1_200, 800
 BRIEF_BIG = 1_000              # agent brief size considered reasonable
 POLL_MIN = 3                   # identical calls with identical results before it is polling
 START_BASELINE = 10_000
+DUP_LINE_MIN = 30              # instruction line length (chars) worth checking for duplicates
+GUIDANCE_KEEP = 2_000          # always-loaded project guidance (tokens) considered reasonable
+EXAMPLE_KEEP = 2               # few-shot examples per tool, prompt or instruction file considered reasonable
+INJECT_KEEP = 300              # injected MCP-server or hook context per block (tokens) considered reasonable
+SKILL_BIG, SKILL_KEEP = 3_000, 1_500   # invoked skill body size, and the part charged as useful
+DUP_SOURCE = 0.5               # share of a web result already seen in another source
+SHINGLE = 8                    # words per shingle when comparing web sources
+UNCHANGED_SHARE = 0.8          # share of a repeated run's tool results identical to the earlier run
 
 EDIT_TOOLS = {"Edit", "MultiEdit", "Write", "NotebookEdit"}
 AGENT_TOOLS = {"Agent", "Task"}
@@ -60,9 +70,14 @@ DB_CMD = re.compile(r"\b(psql|mysql|sqlite3|mongosh|bq\s+query|clickhouse-client
 SEARCH_CMD = re.compile(r"(^|\|\s*|&&\s*)(grep|rg|ag|find)\b")
 URL_RE = re.compile(r"https?://[^\s)\]\"'>]+")
 TRANSCRIPT_MARK = re.compile(r"^\s*(Human|User|Assistant|Claude|⏺)\s*[:>]?\s", re.M)
+EXAMPLE_RE = re.compile(r"<example[^>]*>.*?</example>", re.S)
+MEMORY_LINK = re.compile(r"\]\(([^)\s]+\.md)\)")
+PDF_TEXT_CMD = re.compile(r"\b(pdftotext|pdfplumber|pypdf|PyPDF2|fitz|pymupdf|pdfminer|textutil)\b")
+OCR_CMD = re.compile(r"\b(tesseract|ocrmypdf|easyocr)\b|\bocr\b", re.I)
+DOC_NAME = re.compile(r"[\w.\-]+\.(?:pdf|png|jpe?g)\b", re.I)
 COORDINATION = ("<cross-session-message", "<teammate-message", "<task-notification")
 
-PAYLOAD = "needs the request payload (system prompt, tools, instructions), which transcripts don't store"
+PAYLOAD = "needs the exact request body (cache_control breakpoints, edited messages), which transcripts don't record"
 LABEL = "needs a labelled review of what was relevant or necessary"
 EXPERIMENT = "needs matched runs with independent acceptance checks"
 CONFIG = "depends on settings or provider scope that transcripts don't record"
@@ -79,23 +94,21 @@ ADDITIONAL = {
     8: ("Full transcripts copied between chats", "Conversation history", None),
     9: ("Conversation forks duplicating history", "Conversation history", None),
     10: ("Rebuilding context after frequent fresh starts", "Conversation history", None),
-    14: ("Overlapping directory-level instructions", "Persistent instructions and memory", PAYLOAD),
-    16: ("Duplicate rules across instruction layers", "Persistent instructions and memory", PAYLOAD),
-    17: ("Irrelevant always-loaded project guidance", "Persistent instructions and memory", PAYLOAD),
-    18: ("Stale auto-memory entries", "Persistent instructions and memory", LABEL),
-    19: ("Excessive few-shot examples", "Persistent instructions and memory", PAYLOAD),
+    14: ("Overlapping directory-level instructions", "Persistent instructions and memory", None),
+    16: ("Duplicate rules across instruction layers", "Persistent instructions and memory", None),
+    17: ("Irrelevant always-loaded project guidance", "Persistent instructions and memory", None),
+    18: ("Stale auto-memory entries", "Persistent instructions and memory", None),
+    19: ("Excessive few-shot examples", "Persistent instructions and memory", None),
     20: ("Conflicting instructions causing corrective turns", "Persistent instructions and memory",
          LABEL + " (all corrections are counted in #20)"),
     21: ("Missing prompt caching where supported", "Cache misses and invalidation", None),
     22: ("Cold-cache requests", "Cache misses and invalidation", None),
     24: ("Prefixes below cache eligibility thresholds", "Cache misses and invalidation", None),
-    25: ("Timestamps inside otherwise stable prefixes", "Cache misses and invalidation", PAYLOAD),
-    26: ("Changing system-prompt content", "Cache misses and invalidation",
-         PAYLOAD + " (counted in #3 as 'context changed')"),
-    27: ("Changing loaded tool definitions", "Cache misses and invalidation",
-         PAYLOAD + " (counted in #3 as 'context changed')"),
+    25: ("Timestamps inside otherwise stable prefixes", "Cache misses and invalidation", None),
+    26: ("Changing system-prompt content", "Cache misses and invalidation", None),
+    27: ("Changing loaded tool definitions", "Cache misses and invalidation", None),
     28: ("Editing earlier conversation messages", "Cache misses and invalidation", PAYLOAD),
-    29: ("Unstable tool serialization or ordering", "Cache misses and invalidation", PAYLOAD),
+    29: ("Unstable tool serialization or ordering", "Cache misses and invalidation", None),
     30: ("Switching models with no reusable cache on the receiving model", "Cache misses and invalidation", None),
     31: ("Cache breakpoints on changing content", "Cache overhead and configuration", PAYLOAD),
     32: ("Stable content outside cached prefixes", "Cache overhead and configuration", PAYLOAD),
@@ -104,11 +117,13 @@ ADDITIONAL = {
     35: ("Cache writes never reused", "Cache overhead and configuration", None),
     36: ("Repeated cache warmup requests", "Cache overhead and configuration", HIDDEN),
     37: ("Cache-write pricing premiums", "Cache overhead and configuration", None),
-    38: ("Thinking or effort changes invalidating cached context", "Cache overhead and configuration", CONFIG),
-    39: ("Tool-choice or web-tool configuration changes", "Cache overhead and configuration", CONFIG),
-    40: ("Cache isolation across providers or workspaces", "Cache overhead and configuration", CONFIG),
+    38: ("Thinking or effort changes invalidating cached context", "Cache overhead and configuration", None),
+    39: ("Tool-choice or web-tool configuration changes", "Cache overhead and configuration",
+         CONFIG + " (tool_choice; web tools added or removed are counted in A27)"),
+    40: ("Cache isolation across providers or workspaces", "Cache overhead and configuration", None),
     42: ("Excessive extended-thinking generation", "Model selection and reasoning", EXPERIMENT),
-    43: ("Replayed thinking blocks where preserved", "Model selection and reasoning", PAYLOAD),
+    43: ("Replayed thinking blocks where preserved", "Model selection and reasoning",
+         "transcripts record thinking blocks, but not whether later requests kept them (depends on the model)"),
     44: ("Repeated reasoning over unchanged evidence", "Model selection and reasoning", LABEL),
     45: ("Replanning after every minor update", "Model selection and reasoning", None),
     46: ("Generating unnecessary alternative approaches", "Model selection and reasoning", LABEL),
@@ -128,10 +143,9 @@ ADDITIONAL = {
     60: ("Truncated answers requiring regeneration", "Answer and artifact generation", None),
     65: ("Unnecessary tool discovery calls", "Tools, MCP, skills, and plugins", None),
     66: ("Large tool-call argument payloads", "Tools, MCP, skills, and plugins", None),
-    68: ("Large invoked skill bodies", "Tools, MCP, skills, and plugins",
-         "skill bodies are injected outside tool results; not identifiable in transcripts"),
+    68: ("Large invoked skill bodies", "Tools, MCP, skills, and plugins", None),
     69: ("Unnecessary skill supporting-document reads", "Tools, MCP, skills, and plugins", None),
-    70: ("Verbose plugin or hook context injection", "Tools, MCP, skills, and plugins", PAYLOAD),
+    70: ("Verbose plugin or hook context injection", "Tools, MCP, skills, and plugins", None),
     71: ("Whole-file reads for small relevant sections", "Repository discovery and file reading", None),
     72: ("Repeated reads of unchanged files", "Repository discovery and file reading", None),
     73: ("Broad repository searches", "Repository discovery and file reading", None),
@@ -153,7 +167,7 @@ ADDITIONAL = {
     101: ("Full web pages instead of relevant passages", "Web research and retrieval", None),
     102: ("Navigation, footer, and website boilerplate", "Web research and retrieval", LABEL),
     103: ("Excessive search-result counts", "Web research and retrieval", None),
-    104: ("Duplicate sources containing the same information", "Web research and retrieval", LABEL),
+    104: ("Duplicate sources containing the same information", "Web research and retrieval", None),
     105: ("Repeated fetching of unchanged pages", "Web research and retrieval", None),
     107: ("Overlapping retrieval chunks", "Web research and retrieval", None),
     108: ("Irrelevant retrieved passages", "Web research and retrieval", LABEL),
@@ -164,8 +178,8 @@ ADDITIONAL = {
     113: ("Full-screen screenshots for small relevant regions", "Images, PDFs, and browser interaction", LABEL),
     114: ("Excessive screenshots during browser navigation", "Images, PDFs, and browser interaction", None),
     115: ("Multi-page PDF processing", "Images, PDFs, and browser interaction", None),
-    116: ("PDF page-image processing alongside extracted text", "Images, PDFs, and browser interaction", LABEL),
-    117: ("Duplicate OCR and document-text inputs", "Images, PDFs, and browser interaction", LABEL),
+    116: ("PDF page-image processing alongside extracted text", "Images, PDFs, and browser interaction", None),
+    117: ("Duplicate OCR and document-text inputs", "Images, PDFs, and browser interaction", None),
     119: ("Large image batches containing irrelevant images", "Images, PDFs, and browser interaction", LABEL),
     120: ("Browser retries repeatedly loading the same visual context", "Images, PDFs, and browser interaction", None),
     121: ("Full context copied to every agent", "Multi-agent workflows", None),
@@ -183,13 +197,12 @@ ADDITIONAL = {
     135: ("Invalid structured outputs requiring repair", "Retries, automation, and context rebuilding", None),
     136: ("Repeated unchanged-state polling", "Retries, automation, and context rebuilding", None),
     137: ("Model-powered hooks firing excessively", "Retries, automation, and context rebuilding", HIDDEN),
-    138: ("Scheduled tasks repeating unchanged analysis", "Retries, automation, and context rebuilding",
-         "needs hook data plus a comparison of each run's inputs"),
+    138: ("Scheduled tasks repeating unchanged analysis", "Retries, automation, and context rebuilding", None),
     140: ("Background session-analysis model calls", "Retries, automation, and context rebuilding", HIDDEN),
 }
 SAME_AS = {121: 23, 122: 24, 127: 25}   # canvas row -> core leak id that already measures it
-REVIEW = {1, 6, 22, 37, 54, 69, 109, 115, 125, 131}   # spend to review, not all waste
-# measured inside leak_report.py's core detectors: 30 (#3), 72 and 76 (#7), 135 (#16)
+REVIEW = {1, 6, 17, 22, 37, 54, 69, 109, 115, 125, 131}   # spend to review, not all waste
+# measured inside leak_report.py's core detectors: 25, 26, 27, 29, 30, 38 and 40 (#3), 72 and 76 (#7), 135 (#16)
 
 
 def lid(n):
@@ -366,6 +379,7 @@ def analyse(s, tasks, add, price):
     discovery = 0
     seen = {"lint": set(), "trace": set(), "status": None, "image": {}, "line": {}}
     fetched, polls = {}, defaultdict(int)
+    sources, doc_inputs = [], defaultdict(list)   # A104 web results so far; A116/A117 ways each document was read
     helper_reads = {}
     for r in s.helper_results:
         path = r["input"].get("file_path", "")
@@ -462,6 +476,19 @@ def analyse(s, tasks, add, price):
             urls = len(set(URL_RE.findall(body)))
             if urls > SEARCH_RESULTS:
                 radd(lid(103), s.carry(r["t"], int(tokens * (1 - SEARCH_RESULTS / urls))), f"{urls} search results")
+        if (is_page_tool(name) or is_web_search(name)) and tokens >= 500:   # A104
+            words = body.lower().split()
+            shingles = {hash(tuple(words[i:i + SHINGLE])) for i in range(len(words) - SHINGLE + 1)}
+            where = inp.get("url") or inp.get("query")
+            share = max((len(shingles & sh) / len(shingles) for w, sh in sources if w != where), default=0) if shingles else 0
+            if share >= DUP_SOURCE:
+                radd(lid(104), s.carry(r["t"], int(tokens * share)), f"{name} result {share:.0%} the same as an earlier source")
+            sources.append((where, shingles))
+        if path.lower().endswith(".pdf") or (name == "Read" and r["images"]):   # A116, A117
+            doc_inputs[os.path.basename(path)].append(("pages", r))
+        elif PDF_TEXT_CMD.search(cmd) or OCR_CMD.search(cmd):
+            for doc in set(DOC_NAME.findall(cmd)):
+                doc_inputs[doc].append(("ocr" if OCR_CMD.search(cmd) else "text", r))
         url = inp.get("url") if (is_page_tool(name) or "navigate" in name) else None
         if url:                                                       # A105, A110
             if url in fetched:
@@ -499,6 +526,13 @@ def analyse(s, tasks, add, price):
                 radd(lid(136), tool_share(call) + s.carry(r["t"], tokens), f"{name} returned the same result {polls[key]} times")
         prev = r
 
+    for doc, reads in doc_inputs.items():   # the same document read both as page images and as text
+        kinds = {k for k, _ in reads}
+        if "pages" in kinds and len(kinds) > 1:
+            kind, r = max(reads, key=lambda x: x[1]["t"])
+            leak = lid(117) if "ocr" in kinds else lid(116)
+            add(leak, s.carry(r["t"], r["tokens"] + r["image_tokens"]), f"{doc} read as page images and as extracted text", ref=r["id"])
+
     # A124 Verbose agent task briefs, A125 repeated agent startup, A126 coordination chatter,
     # A131 clarification loops
     for u in s.tool_uses.values():
@@ -529,6 +563,78 @@ def analyse(s, tasks, add, price):
         if cost:
             add(lid(134), cost, "turn interrupted before it finished")
 
+    injected(s, add)
+    # inputs for A138: the exact first request and the tool results it produced
+    first = next((p["text"] for p in s.prompts if not p["text"].lstrip().startswith("<")), "")
+    s.first_request = md5(" ".join(first.lower().split())) if len(first.strip()) >= 20 else None
+    s.result_hashes = {r["hash"] for r in results if not r["error"] and r["tokens"] >= 50}
+
+
+def injected(s, add):
+    """Detectors on what Claude Code injects and records as attachments: instruction files,
+    MCP-server and hook context, prompt snapshots and invoked skill bodies.
+    A14 overlapping directory instructions, A16 duplicate rules across layers, A17 always-loaded
+    guidance, A18 stale memory entries, A19 few-shot examples, A68 skill bodies, A70 injected context."""
+    snaps = [(t, a) for t, a, _ in s.attachments if a.get("type") == "prompt_snapshot"]
+
+    def examples(text):
+        return sum(map(len, EXAMPLE_RE.findall(text)[EXAMPLE_KEEP:]))
+
+    for t, a, rendered in s.attachments:
+        kind = a.get("type")
+        if kind == "instructions":
+            seen, guidance = {}, 0
+            for f in a.get("files") or []:
+                path, layer, content = f.get("path", ""), f.get("type", ""), f.get("content", "")
+                name = os.path.basename(os.path.dirname(path)) + "/" + os.path.basename(path)
+                dup = {14: 0, 16: 0}
+                for line in content.splitlines():
+                    key = " ".join(line.split()).lower()
+                    if len(key) < DUP_LINE_MIN or key.startswith("```"):
+                        continue
+                    other = seen.get(key)
+                    if other and other[0] != path:   # A14 two directory levels, A16 two layers
+                        dup[14 if layer == other[1] == "Project" else 16] += len(line)
+                    seen.setdefault(key, (path, layer))
+                for leak, chars in dup.items():
+                    if tok(chars) > 50:
+                        add(lid(leak), s.carry(t, tok(chars)), f"{name} repeats ~{tok(chars):,} tokens of an earlier instruction file")
+                if layer in ("Project", "Local"):
+                    guidance += tok(len(content))
+                if layer == "AutoMem":                                    # A18 index lines whose memory file is gone
+                    stale = [l for l in content.splitlines() for m in MEMORY_LINK.findall(l)
+                             if not os.path.isabs(m) and not os.path.exists(os.path.join(os.path.dirname(path), m))]
+                    if stale:
+                        add(lid(18), s.carry(t, tok(sum(map(len, stale)))),
+                            f"memory index lines pointing to deleted memory files: {len(stale)}")
+                if examples(content):                                     # A19
+                    add(lid(19), s.carry(t, tok(examples(content))), f"{name}: more than {EXAMPLE_KEEP} examples")
+            if guidance > GUIDANCE_KEEP:                                  # A17
+                add(lid(17), s.carry(t, guidance - GUIDANCE_KEEP),
+                    f"~{guidance:,} tokens of always-loaded project guidance (review what every session needs)")
+        elif kind == "mcp_instructions_delta":                            # A70
+            for name, block in zip(a.get("addedNames") or [], a.get("addedBlocks") or []):
+                if tok(len(block)) > INJECT_KEEP:
+                    add(lid(70), s.carry(t, tok(len(block)) - INJECT_KEEP), f"{name} server instructions ~{tok(len(block)):,} tokens")
+        elif str(kind).startswith("hook_"):
+            size = tok(rendered or len(json.dumps(a)))
+            if size > INJECT_KEEP:
+                add(lid(70), s.carry(t, size - INJECT_KEEP), f"{kind} injected ~{size:,} tokens")
+
+    # A19 in the system prompt and tool descriptions, which stay loaded until the next snapshot
+    for k, (t, a) in enumerate(snaps):
+        end = next((x for x, b in snaps[k + 1:] if b.get("tools") or b.get("systemPrompt")), float("inf"))
+        chars = examples(json.dumps(a.get("systemPrompt") or ""))
+        chars += sum(examples(str(x.get("description", ""))) for x in a.get("tools") or [])
+        if chars:
+            add(lid(19), tok(chars) * s.read_span(t, end), f"~{tok(chars):,} tokens of examples beyond {EXAMPLE_KEEP} per tool or prompt")
+
+    for b in s.skill_bodies:                                              # A68
+        use = s.tool_uses.get(b["id"])
+        if b["tokens"] > SKILL_BIG and (use is None or use["name"] == "Skill"):
+            name = str(use["input"].get("skill", "")) if use else "a skill"
+            add(lid(68), s.carry(b["t"], b["tokens"] - SKILL_KEEP), f"invoked {name}: ~{b['tokens']:,}-token skill body")
+
 
 def min_cacheable(model):
     """Minimum cacheable prompt length; verify against the prompt-caching docs for new models."""
@@ -538,15 +644,23 @@ def min_cacheable(model):
 
 
 def cross_session(sessions, add_finding):
-    """A7 repeated pastes, A9 conversation forks, A10 frequent fresh starts."""
+    """A7 repeated pastes, A9 conversation forks, A10 frequent fresh starts, A138 unchanged reruns."""
     by_project = defaultdict(list)
     for s in sessions:
         by_project[s.project].append(s)
     owner = {}
     for ss in by_project.values():
         ss.sort(key=lambda s: s.calls[0]["t"])
-        pasted, prev = set(), None
+        pasted, prev, requests = set(), None, defaultdict(list)
         for s in ss:
+            if s.first_request:   # A138 the same request again, finding the same tool results
+                for e in requests[s.first_request]:
+                    same = len(s.result_hashes & e.result_hashes) / len(s.result_hashes) if len(s.result_hashes) >= 3 else 0
+                    if same >= UNCHANGED_SHARE:
+                        add_finding(lid(138), s, s.cost + s.helper_cost,
+                                    f"same request as session {e.sid[:8]}, {same:.0%} of tool results unchanged")
+                        break
+                requests[s.first_request].append(s)
             for p in s.prompts:
                 for para in re.split(r"\n\s*\n", p["body"]):
                     if len(para) >= PASTE_MIN:

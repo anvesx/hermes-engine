@@ -256,7 +256,15 @@ def cmd_dashboard(a, cfg):
             start_join(cfg, args[0], None, '/token-metrics:dashboard verify <code> "Your Name"')
             return
         else:
-            raise Fail(f"you haven't joined yet: run /token-metrics:dashboard you@{DOMAIN}")
+            # a first run from the slash command: no terminal to prompt in, so explain the steps
+            # and exit 0 (a non-zero exit shows up in Claude Code as "Shell command failed")
+            print("Welcome to token-metrics! You haven't joined the leaderboard yet. Two steps:\n")
+            print(f"  1. /token-metrics:dashboard <your work email>      e.g. /token-metrics:dashboard jane@{DOMAIN}")
+            print("     This emails you a 6-digit code.")
+            print('  2. /token-metrics:dashboard verify <code> <Your Name>')
+            print("     This joins, syncs your history and opens your dashboard.\n")
+            print("Nothing is shared until step 2.")
+            return
     else:
         try:
             print("Synced your latest stats." if sync(cfg, force=True) else "Another sync is running; showing the last one.")

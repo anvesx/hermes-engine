@@ -1,0 +1,11 @@
+{
+  "name": "devx",
+  "owner": { "name": "devx Labs" },
+  "plugins": [
+    {
+      "name": "token-metrics",
+      "source": "./token-metrics",
+      "description": "Per-task token metrics, a ranked token-leak report, and the opt-in company leaderboard for Claude Code."
+    }
+  ]
+}

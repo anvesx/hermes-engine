@@ -5,6 +5,22 @@ token leaks by estimated cost in 50 categories built from the team's Leak Catego
 (see `token-leak-categories.md` at the repo root). Your settings.json hooks are not modified: plugin hooks run
 alongside your own. Data stays in `~/.claude/metrics/` unless you join the company leaderboard (below).
 
+## Install
+
+From the shared zip (it unpacks to a `plugins` folder, which is also a local marketplace named `devx`):
+
+```bash
+cd ~/Downloads && unzip token-metrics.zip
+claude plugin marketplace add ~/Downloads/plugins
+claude plugin install token-metrics@devx
+```
+
+Then start `claude` as usual and run `/token-metrics:dashboard`. Installing copies the plugin into Claude Code's
+plugin cache, so the unzipped folder can be deleted afterwards. To update from a newer zip, unzip it over the old
+folder and run `claude plugin marketplace update devx && claude plugin update token-metrics@devx`.
+To try it for one session without installing: `claude --plugin-dir ~/Downloads/plugins/token-metrics`
+(the hooks, including the hourly leaderboard sync, only run in sessions started that way).
+
 ## Use
 
 | Type in Claude Code | What happens |

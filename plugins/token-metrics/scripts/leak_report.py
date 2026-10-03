@@ -32,7 +32,7 @@ import os
 import re
 import statistics
 import struct
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 import leak_categories
@@ -60,7 +60,17 @@ CHEAPER = PRICES["claude-sonnet-5-5"]   # what a simple task would have cost on 
 WRITE_MULT = {"ephemeral_5m_input_tokens": 1.25, "ephemeral_1h_input_tokens": 2.0}   # cache-write price / input price
 SYNTHETIC = "<synthetic>"   # messages Claude Code writes itself (errors, placeholders): not model calls
 TOP_TIER = ("opus", "fable")
-CHARS_PER_TOKEN = 4
+# Characters per token for item-size estimates (tool results, prompts, injected text). Per-call totals come
+# from usage and need no estimate. Each session measures its own ratio per model (Session._calibrate); these
+# defaults apply when it has too few samples: pooled medians of that same measurement over 166 tool results
+# (new: 2.37, n=121; old: 3.10, n=45). The tokenizer introduced with Opus 4.7 (also Opus 5.x, Fable,
+# Sonnet 5.x) gives ~30% more tokens for the same text than the one before it.
+CHARS_PER_TOKEN = {"new": 2.37, "old": 3.10}
+OLD_TOKENIZER = ("claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1", "claude-opus-4-2", "claude-sonnet-4",
+                 "claude-sonnet-3", "claude-haiku", "claude-3")   # anything else (incl. unknown models) is "new"
+CALIBRATE_MIN = 10             # clean samples a model needs in a session to use the session's own ratio
+CALIBRATE_CHARS = 8_000        # tool results this large make the context-growth measurement precise
+CALIBRATE_RANGE = (1.2, 6.0)   # ratios outside this are measurement noise, not text
 START_BASELINE = 10_000        # starting context considered reasonable
 CARRY_MIN = 20_000             # history carried into a new task before it counts as a leak
 TASK_GAP_S = 30 * 60           # an untagged prompt after this much idle time starts a new task
@@ -130,8 +140,9 @@ NOT_RECORDED = {   # older Claude Code versions don't record what was loaded, on
 EFFORT_CMD = re.compile(r"<command-name>/effort</command-name>")
 
 
-def tok(chars):
-    return chars // CHARS_PER_TOKEN
+def tokenizer(model):
+    m = (model or "").lower()
+    return "old" if any(k in m for k in OLD_TOKENIZER) else "new"
 
 
 def price(model):
@@ -273,6 +284,53 @@ class Session:
         self.attachments, self.skill_bodies = [], []   # what Claude Code injected: (t, attachment, rendered chars)
         self._parse(entries)
         self._segments()
+        self._calibrate()
+        self._size_items()
+
+    # -- item sizes ----------------------------------------------------------------
+    def _calibrate(self):
+        """Characters per token by model, measured from this session. A sample is a text tool result of
+        CALIBRATE_CHARS+ characters, the only result between two calls of one stream (main session or one
+        agent) on the same model, with no prompt, injected attachment or compaction in between. The second
+        call's context grew by exactly the first call's output plus that result, so
+        result tokens = ctx(next) - ctx(call) - out(call). A model with fewer than CALIBRATE_MIN samples
+        uses its tokenizer's default."""
+        samples = defaultdict(list)
+        injected = sorted(t for t, _, _ in self.attachments)
+        streams = [(self.calls, self.results, self.prompts)]
+        streams += [(calls, self.helper_results, []) for calls in self.agents.values()]
+        for calls, results, prompts in streams:
+            by_id = {r["id"]: r for r in results}
+            for a, b in zip(calls, calls[1:]):
+                uses = [x for x in a["blocks"] if x.get("type") == "tool_use"]
+                r = by_id.get(uses[0].get("id")) if len(uses) == 1 else None
+                if (not r or r["images"] or r["chars"] < CALIBRATE_CHARS or a["model"] != b["model"]
+                        or any(a["t"] < x <= b["t"] for x in self.comp_sorted)
+                        or any(a["t"] < p["t"] <= b["t"] for p in prompts)
+                        or (calls is self.calls and any(a["t"] < x <= b["t"] for x in injected))):
+                    continue
+                grew = b["ctx"] - a["ctx"] - a["out"]
+                if grew > 0 and CALIBRATE_RANGE[0] <= r["chars"] / grew <= CALIBRATE_RANGE[1]:
+                    samples[a["model"]].append(r["chars"] / grew)
+        self.calibration_samples = dict(samples)
+        self.calibration = {m: (statistics.median(v), len(v)) for m, v in samples.items() if len(v) >= CALIBRATE_MIN}
+        models = Counter(c["model"] for c in self.calls or self.helper_calls)
+        self.main_model = models.most_common(1)[0][0] if models else ""
+
+    def chars_per_token(self, model=None):
+        model = model or self.main_model
+        return self.calibration[model][0] if model in self.calibration else CHARS_PER_TOKEN[tokenizer(model)]
+
+    def tok(self, chars, model=None):
+        """Estimated tokens for `chars` characters of text read or written by `model` (default: the main model)."""
+        return int(chars / self.chars_per_token(model))
+
+    def _size_items(self):
+        for r in self.results + self.helper_results:
+            r["tokens"] = self.tok(r["chars"], r["call"]["model"] if r["call"] else None)
+        for x in self.prompts + self.skill_bodies:
+            x["tokens"] = self.tok(x["chars"])
+        self.summaries = [(t, self.tok(chars)) for t, chars in self.summaries]
 
     # -- parsing ---------------------------------------------------------------
     def _result(self, e, b):
@@ -282,7 +340,7 @@ class Session:
         images = [(hashlib.md5(json.dumps(c.get("source", {}), sort_keys=True).encode()).hexdigest(), image_tokens(c))
                   for c in content if isinstance(c, dict) and c.get("type") == "image"] if isinstance(content, list) else []
         return {"t": e["_t"], "id": b.get("tool_use_id"), "agent": e["_agent"],
-                "tokens": tok(text_len(content)), "images": images, "image_tokens": sum(n for _, n in images),
+                "chars": text_len(content), "images": images, "image_tokens": sum(n for _, n in images),
                 "is_error": bool(b.get("is_error")),
                 "error": bool(b.get("is_error")) or bool(ERROR_TEXT.search(txt[:600])),
                 "text": txt, "body": body, "hash": hashlib.md5(body.encode(errors="replace")).hexdigest()}
@@ -304,7 +362,7 @@ class Session:
                 continue
             if e.get("isCompactSummary"):
                 if not e["_helper"]:
-                    self.summaries.append((e["_t"], tok(text_len(content))))
+                    self.summaries.append((e["_t"], text_len(content)))   # chars until _size_items
                 continue
             if e.get("type") == "assistant" and msg.get("usage") and msg.get("model") != SYNTHETIC:
                 mid = msg.get("id") or e.get("uuid")
@@ -329,7 +387,7 @@ class Session:
                             (self.helper_results if e["_helper"] else self.results).append(self._result(e, b))
                 elif e.get("isMeta") and e.get("sourceToolUseID"):   # an invoked skill's body
                     if not e["_helper"]:
-                        self.skill_bodies.append({"t": e["_t"], "id": e["sourceToolUseID"], "tokens": tok(text_len(content))})
+                        self.skill_bodies.append({"t": e["_t"], "id": e["sourceToolUseID"], "chars": text_len(content)})
                 elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
                     docs = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "document") if isinstance(content, list) else 0
@@ -337,7 +395,7 @@ class Session:
                         self.interrupts.append(e["_t"])
                     elif txt or docs:
                         body = text_of(content, 50_000)
-                        self.prompts.append({"t": e["_t"], "tokens": tok(len(body)), "text": txt, "body": body, "docs": docs})
+                        self.prompts.append({"t": e["_t"], "chars": len(body), "text": txt, "body": body, "docs": docs})
         # one compaction writes a boundary marker and a summary; count boundaries when present
         self.compactions = boundaries or [t for t, _ in self.summaries]
 
@@ -466,6 +524,8 @@ def analyse(s: Session, findings):
 
     def add(leak, cost, detail, ref=None, overlap=False):
         add_finding(findings, leak, s, cost, detail, ref, overlap)
+
+    findings["_calibration"].append(s.calibration.get(s.main_model, (s.chars_per_token(), 0)))
 
     # 1. Heavy starting context: excess over the baseline, re-read on every call
     findings["_prefix_sizes"].append(prefix)
@@ -629,7 +689,7 @@ def analyse(s: Session, findings):
         if u["name"] in ("Read", "Edit", "MultiEdit"):
             read_paths.add(path)
         elif u["name"] == "Write" and path in read_paths:
-            out_tokens = tok(len(u["input"].get("content", "")))
+            out_tokens = s.tok(len(u["input"].get("content", "")), u["call"]["model"])
             add(8, out_tokens * price(u["call"]["model"])[1] / 1e6,
                 f"rewrote whole file {os.path.basename(path)} (~{out_tokens:,} tokens)")
 
@@ -666,7 +726,7 @@ def analyse(s: Session, findings):
     snaps = [(t, a["tools"]) for t, a, _ in s.attachments if a.get("type") == "prompt_snapshot" and a.get("tools")]
     if snaps:
         findings["_snapshot_sessions"].append(s.sid)
-        findings["_mcp_tokens"].append(sum(tok(len(json.dumps(x))) for x in snaps[0][1]
+        findings["_mcp_tokens"].append(sum(s.tok(len(json.dumps(x))) for x in snaps[0][1]
                                            if str(x.get("name", "")).startswith("mcp__")))
     for k, (t, tools) in enumerate(snaps):
         end = snaps[k + 1][0] if k + 1 < len(snaps) else float("inf")
@@ -678,7 +738,7 @@ def analyse(s: Session, findings):
                 srv[0] += 1
                 if name not in used:
                     srv[1] += 1
-                    srv[2] += tok(len(json.dumps(x)))
+                    srv[2] += s.tok(len(json.dumps(x)))
         for server, (n, unused, tokens) in servers.items():
             if unused:
                 add(12, tokens * s.read_span(t, end),
@@ -695,13 +755,13 @@ def analyse(s: Session, findings):
             unused = [x for x in entries if x[2:].split(":", 1)[0] not in invoked]
             findings["_listing_sessions"].append(s.sid)
             if unused:
-                add(13, s.carry(t, tok(sum(map(len, unused)))),
-                    f"{len(unused)}/{len(entries)} listed skills never invoked (~{tok(sum(map(len, unused))):,} tokens)")
+                add(13, s.carry(t, s.tok(sum(map(len, unused)))),
+                    f"{len(unused)}/{len(entries)} listed skills never invoked (~{s.tok(sum(map(len, unused))):,} tokens)")
         elif a.get("type") == "agent_listing_delta":
             unused = [l for l in a.get("addedLines") or [] if l[2:].split(":", 1)[0] not in agent_types]
             if unused:
-                add(13, s.carry(t, tok(sum(map(len, unused)))),
-                    f"{len(unused)} listed agent types never used (~{tok(sum(map(len, unused))):,} tokens)")
+                add(13, s.carry(t, s.tok(sum(map(len, unused)))),
+                    f"{len(unused)} listed agent types never used (~{s.tok(sum(map(len, unused))):,} tokens)")
 
     # 18. High effort on trivial turns: a turn answered in one short reply with no tool calls,
     # whose output tokens (which include reasoning) far exceed the reply itself
@@ -712,10 +772,10 @@ def analyse(s: Session, findings):
     for calls in turn_calls.values():
         c = calls[0]
         think = sum(len(b.get("thinking", "")) for b in c["blocks"] if b.get("type") == "thinking")
-        findings["_thinking"].append(tok(think))
+        findings["_thinking"].append(s.tok(think, c["model"]))
         if len(calls) != 1 or c["n_tools"]:
             continue
-        reply = tok(sum(len(b.get("text", "")) for b in c["blocks"] if b.get("type") == "text"))
+        reply = s.tok(sum(len(b.get("text", "")) for b in c["blocks"] if b.get("type") == "text"), c["model"])
         reasoning = c["out"] - reply
         if reply <= TRIVIAL_TEXT and reasoning > THINK_LIMIT:
             add(18, (reasoning - THINK_BASELINE) * price(c["model"])[1] / 1e6,
@@ -875,6 +935,12 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
     days = sorted({datetime.fromtimestamp(c["t"], timezone.utc).date() for s in sessions for c in s.calls})
     w(f"# Token leak report\n")
     w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, API-equivalent spend ${total:,.2f}\n" if days else "no data\n")
+    cal = findings["_calibration"]
+    if cal:
+        own = sum(1 for _, n in cal if n)
+        w(f"Item sizes (tool results, prompts, injected text) are estimated at {statistics.median(r for r, _ in cal):.2f} "
+          f"characters per token (median). {own}/{len(cal)} sessions measured their own ratio from their tool results; "
+          f"the rest use the tokenizer default. Per-call totals are exact.\n")
     if show_all:
         examples = legacy_tables(findings, total, sessions, w, core_only)
     else:

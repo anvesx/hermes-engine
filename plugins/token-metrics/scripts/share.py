@@ -33,7 +33,7 @@ from datetime import datetime
 
 import stats
 
-CLIENT = "token-metrics/1.5.1"
+CLIENT = "token-metrics/1.5.3"
 DEFAULT_URL = "https://token-metrics-leaderboard.vercel.app"
 DOMAIN = "devxlabs.ai"
 SYNC_EVERY_S = 60 * 60

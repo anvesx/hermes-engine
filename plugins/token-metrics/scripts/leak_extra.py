@@ -19,7 +19,6 @@ import os
 import re
 from collections import defaultdict
 
-CHARS_PER_TOKEN = 4
 HISTORY_LIMIT = 100_000        # conversation history per call considered reasonable
 STALE_CALLS = 30               # a tool result still carried this many calls later counts as stale
 PASTE_MIN = 400                # pasted paragraph size (chars) worth tracking for repeats
@@ -210,10 +209,6 @@ def lid(n):
     return 1000 + n
 
 
-def tok(chars):
-    return chars // CHARS_PER_TOKEN
-
-
 def md5(text):
     return hashlib.md5(text.encode(errors="replace")).hexdigest()
 
@@ -278,7 +273,7 @@ def analyse(s, tasks, add, price):
         add(lid(5), stale, f"{n} tool results still carried {STALE_CALLS}+ calls later")
 
     # A6 Previous assistant answers repeatedly replayed
-    replay = sum(s.carry(c["t"], tok(sum(map(len, texts(c))))) for c in calls)
+    replay = sum(s.carry(c["t"], s.tok(sum(map(len, texts(c))))) for c in calls)
     if replay:
         add(lid(6), replay, "assistant text re-read on later calls")
 
@@ -329,7 +324,7 @@ def analyse(s, tasks, add, price):
         plans = sorted((u for u in s.tool_uses.values()
                         if u["name"] in PLAN_TOOLS and tsk["start"] <= u["t"] < tsk["end"]), key=lambda u: u["t"])
         for k, u in enumerate(plans[PLAN_LIMIT:], PLAN_LIMIT + 1):
-            add(lid(45), tool_share(u["call"]) + s.carry(u["t"], tok(len(json.dumps(u["input"])))),
+            add(lid(45), tool_share(u["call"]) + s.carry(u["t"], s.tok(len(json.dumps(u["input"])))),
                 f"plan update {k} in one task")
 
     # A52 Repeating the user's question, A53 repeated explanations, A54 progress narration,
@@ -352,22 +347,22 @@ def analyse(s, tasks, add, price):
             a = set(re.findall(r"[a-z0-9_]{3,}", first.lower()))
             q = set(re.findall(r"[a-z0-9_]{3,}", s.prompts[k]["text"].lower()))
             if len(a) >= 8 and q and len(a & q) / len(a | q) >= ECHO_SIM:
-                add(lid(52), out_cost(c, tok(len(first))) + s.carry(c["t"], tok(len(first))), "reply opened by restating the request")
+                add(lid(52), out_cost(c, s.tok(len(first))) + s.carry(c["t"], s.tok(len(first))), "reply opened by restating the request")
         for para in re.split(r"\n\s*\n", body):
             if len(para) >= 300:
                 h = md5(" ".join(para.lower().split()))
                 if h in paragraphs:
-                    add(lid(53), out_cost(c, tok(len(para))) + s.carry(c["t"], tok(len(para))), f"repeated a ~{tok(len(para)):,}-token explanation")
+                    add(lid(53), out_cost(c, s.tok(len(para))) + s.carry(c["t"], s.tok(len(para))), f"repeated a ~{s.tok(len(para)):,}-token explanation")
                 paragraphs.add(h)
         for block in re.findall(r"```.*?\n(.*?)```", body, re.S):
             if len(block) >= CODE_MIN:
                 h = md5(block.strip())
                 if h in artifacts:
-                    add(lid(58), out_cost(c, tok(len(block))) + s.carry(c["t"], tok(len(block))),
-                        f"reprinted a ~{tok(len(block)):,}-token code block already written")
+                    add(lid(58), out_cost(c, s.tok(len(block))) + s.carry(c["t"], s.tok(len(block))),
+                        f"reprinted a ~{s.tok(len(block)):,}-token code block already written")
                 artifacts.add(h)
-        if c["n_tools"] and tok(len(body)) > NARRATION_KEEP:
-            extra = tok(len(body)) - NARRATION_KEEP
+        if c["n_tools"] and s.tok(len(body)) > NARRATION_KEEP:
+            extra = s.tok(len(body)) - NARRATION_KEEP
             narration, n_narration = narration + out_cost(c, extra) + s.carry(c["t"], extra), n_narration + 1
         if c.get("stop") == "max_tokens":
             add(lid(60), out_cost(c, c["out"]), f"reply cut off at the output limit (~{c['out']:,} tokens)")
@@ -398,7 +393,7 @@ def analyse(s, tasks, add, price):
             discovery += 1
             if discovery > DISCOVERY_LIMIT:
                 radd(lid(65), tool_share(call) + s.carry(r["t"], tokens), f"{name} call {discovery} in one session")
-        args = tok(len(json.dumps(inp)))
+        args = s.tok(len(json.dumps(inp)))
         if name not in EDIT_TOOLS | AGENT_TOOLS and args > ARGS_BIG:   # A66
             radd(lid(66), out_cost(call, args) + s.carry(r["t"], args) if call else 0.0, f"{name} called with ~{args:,} tokens of arguments")
         if path:
@@ -443,12 +438,12 @@ def analyse(s, tasks, add, price):
                 radd(lid(91), s.carry(r["t"], tokens - KEEP), f"git diff ~{tokens:,} tokens")
             gen = sum(len(sec) for sec in re.split(r"(?=^diff --git )", body, flags=re.M)
                       if re.match(r"diff --git a/(\S+)", sec) and GENERATED.search(re.match(r"diff --git a/(\S+)", sec).group(1)))
-            if tok(gen) > 500:                                        # A92
-                radd(lid(92), s.carry(r["t"], tok(gen)), f"~{tok(gen):,} tokens of lockfile/generated diff")
+            if s.tok(gen) > 500:                                        # A92
+                radd(lid(92), s.carry(r["t"], s.tok(gen)), f"~{s.tok(gen):,} tokens of lockfile/generated diff")
         if LOG_CMD.search(cmd) and not LOG_SHORT.search(cmd):         # A93
             meta = sum(len(l) for l in lines if re.match(r"(commit [0-9a-f]{7,}|Author:|Date:|Merge:)", l))
-            if tok(meta) > 300:
-                radd(lid(93), s.carry(r["t"], tok(meta)), f"~{tok(meta):,} tokens of commit metadata")
+            if s.tok(meta) > 300:
+                radd(lid(93), s.carry(r["t"], s.tok(meta)), f"~{s.tok(meta):,} tokens of commit metadata")
         if STATUS_CMD.search(cmd):                                    # A94
             if seen["status"] == r["hash"]:
                 radd(lid(94), s.carry(r["t"], tokens), "unchanged git status")
@@ -470,7 +465,7 @@ def analyse(s, tasks, add, price):
             except ValueError:
                 wrapper = 0
             if wrapper > 0.5 * len(body):
-                radd(lid(100), s.carry(r["t"], tok(int(wrapper - 0.5 * len(body)))), f"JSON keys and wrappers {wrapper / len(body):.0%} of {name} result")
+                radd(lid(100), s.carry(r["t"], s.tok(int(wrapper - 0.5 * len(body)))), f"JSON keys and wrappers {wrapper / len(body):.0%} of {name} result")
         if is_web_search(name):                                       # A103
             urls = len(set(URL_RE.findall(body)))
             if urls > SEARCH_RESULTS:
@@ -503,8 +498,8 @@ def analyse(s, tasks, add, price):
                     if seen["line"].get(h, r["id"]) != r["id"]:
                         dup += len(l)
                     seen["line"].setdefault(h, r["id"])
-            if tok(dup) > 200:
-                radd(lid(107), s.carry(r["t"], tok(dup)), f"~{tok(dup):,} tokens of passages already retrieved")
+            if s.tok(dup) > 200:
+                radd(lid(107), s.carry(r["t"], s.tok(dup)), f"~{s.tok(dup):,} tokens of passages already retrieved")
         for h, itok in r["images"]:                                   # A111, A112, A120
             if itok > IMAGE_BIG:
                 radd(lid(111), (itok - IMAGE_KEEP) * price(call["model"])[0] / 1e6 if call else 0.0, f"image ~{itok:,} tokens")
@@ -536,11 +531,11 @@ def analyse(s, tasks, add, price):
     # A131 clarification loops
     for u in s.tool_uses.values():
         if u["name"] in AGENT_TOOLS:
-            brief = tok(len(str(u["input"].get("prompt", ""))))
+            brief = s.tok(len(str(u["input"].get("prompt", ""))))
             if brief > BRIEF_BIG:
                 add(lid(124), out_cost(u["call"], brief - BRIEF_BIG), f"agent brief ~{brief:,} tokens")
         elif u["name"] == "SendMessage":
-            size = tok(len(json.dumps(u["input"])))
+            size = s.tok(len(json.dumps(u["input"])))
             add(lid(126), out_cost(u["call"], size) + s.carry(u["t"], size), "message sent to another agent")
         elif u["name"] == "AskUserQuestion":
             add(lid(131), u["call"]["cost"], "clarifying question asked")
@@ -596,27 +591,27 @@ def injected(s, add):
                         dup[14 if layer == other[1] == "Project" else 16] += len(line)
                     seen.setdefault(key, (path, layer))
                 for leak, chars in dup.items():
-                    if tok(chars) > 50:
-                        add(lid(leak), s.carry(t, tok(chars)), f"{name} repeats ~{tok(chars):,} tokens of an earlier instruction file")
+                    if s.tok(chars) > 50:
+                        add(lid(leak), s.carry(t, s.tok(chars)), f"{name} repeats ~{s.tok(chars):,} tokens of an earlier instruction file")
                 if layer in ("Project", "Local"):
-                    guidance += tok(len(content))
+                    guidance += s.tok(len(content))
                 if layer == "AutoMem":                                    # A18 index lines whose memory file is gone
                     stale = [l for l in content.splitlines() for m in MEMORY_LINK.findall(l)
                              if not os.path.isabs(m) and not os.path.exists(os.path.join(os.path.dirname(path), m))]
                     if stale:
-                        add(lid(18), s.carry(t, tok(sum(map(len, stale)))),
+                        add(lid(18), s.carry(t, s.tok(sum(map(len, stale)))),
                             f"memory index lines pointing to deleted memory files: {len(stale)}")
                 if examples(content):                                     # A19
-                    add(lid(19), s.carry(t, tok(examples(content))), f"{name}: more than {EXAMPLE_KEEP} examples")
+                    add(lid(19), s.carry(t, s.tok(examples(content))), f"{name}: more than {EXAMPLE_KEEP} examples")
             if guidance > GUIDANCE_KEEP:                                  # A17
                 add(lid(17), s.carry(t, guidance - GUIDANCE_KEEP),
                     f"~{guidance:,} tokens of always-loaded project guidance (review what every session needs)")
         elif kind == "mcp_instructions_delta":                            # A70
             for name, block in zip(a.get("addedNames") or [], a.get("addedBlocks") or []):
-                if tok(len(block)) > INJECT_KEEP:
-                    add(lid(70), s.carry(t, tok(len(block)) - INJECT_KEEP), f"{name} server instructions ~{tok(len(block)):,} tokens")
+                if s.tok(len(block)) > INJECT_KEEP:
+                    add(lid(70), s.carry(t, s.tok(len(block)) - INJECT_KEEP), f"{name} server instructions ~{s.tok(len(block)):,} tokens")
         elif str(kind).startswith("hook_"):
-            size = tok(rendered or len(json.dumps(a)))
+            size = s.tok(rendered or len(json.dumps(a)))
             if size > INJECT_KEEP:
                 add(lid(70), s.carry(t, size - INJECT_KEEP), f"{kind} injected ~{size:,} tokens")
 
@@ -626,7 +621,7 @@ def injected(s, add):
         chars = examples(json.dumps(a.get("systemPrompt") or ""))
         chars += sum(examples(str(x.get("description", ""))) for x in a.get("tools") or [])
         if chars:
-            add(lid(19), tok(chars) * s.read_span(t, end), f"~{tok(chars):,} tokens of examples beyond {EXAMPLE_KEEP} per tool or prompt")
+            add(lid(19), s.tok(chars) * s.read_span(t, end), f"~{s.tok(chars):,} tokens of examples beyond {EXAMPLE_KEEP} per tool or prompt")
 
     for b in s.skill_bodies:                                              # A68
         use = s.tool_uses.get(b["id"])
@@ -665,7 +660,7 @@ def cross_session(sessions, add_finding):
                     if len(para) >= PASTE_MIN:
                         h = md5(" ".join(para.split()))
                         if h in pasted:
-                            add_finding(lid(7), s, s.carry(p["t"], tok(len(para))), f"pasted the same ~{tok(len(para)):,}-token text again")
+                            add_finding(lid(7), s, s.carry(p["t"], s.tok(len(para))), f"pasted the same ~{s.tok(len(para)):,}-token text again")
                         pasted.add(h)
             shared = {owner[u] for u in s.uuids if u in owner}
             if shared:

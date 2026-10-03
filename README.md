@@ -19,6 +19,14 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
    Then start a new Claude Code session. The plugin loads in every session and doesn't change your `settings.json`.
 
+   Or, from inside a Claude Code session:
+
+   ```
+   /plugin marketplace add anvesx/hermes-engine
+   /plugin install token-metrics@hermes-engine
+   /reload-plugins
+   ```
+
 2. **Make sure git knows your work email.** The plugin joins you with it, so there's no code to type:
 
    ```bash

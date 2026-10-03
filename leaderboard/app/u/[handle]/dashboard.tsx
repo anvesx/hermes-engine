@@ -4,8 +4,8 @@ import type { Dashboard as Data } from "@/lib/dashboard";
 import { compact, hours, money, pct } from "@/lib/format";
 import { cardPath, cardVersion } from "@/lib/profile";
 import { RULES } from "@/lib/score";
-import { PointsBars, ShareBars, SplitBar, WasteLine, WeekBars, dayLabel } from "./charts";
-import { Poster } from "./poster";
+import { PointsBars, ShareBars, SplitBar, WasteLine, WeekBars } from "./charts";
+import { Hero, SegBar } from "./hero";
 
 const PERIODS: [Period, string][] = [["week", "This week"], ["month", "Last 4 weeks"], ["all", "All time"]];
 const CARD_FIELDS = ["name", "level", "badges", "streak", "tokens", "hours", "spend"];
@@ -36,19 +36,14 @@ export function Dashboard({ data, handle }: { data: Data; handle: string }) {
   return (
     <main className="dash">
       <nav className="dnav">
-        <span className="logo">TOKEN<i>/</i>METRICS</span>
+        <span className="logo"><span className="arrow">❯</span> token-metrics<span className="dim">/dashboard</span></span>
         <form action="/api/auth/logout" method="post" className="row">
-          <Link href="/">Leaderboard ↗</Link>
-          <button className="link">Sign out</button>
+          <Link href="/">cd ../leaderboard</Link>
+          <button className="link">logout</button>
         </form>
       </nav>
 
-      <Poster data={data} handle={handle} />
-      <p className="sync">
-        <span>#{ranks.month.rank ?? "–"} of {ranks.month.of} last 4 weeks</span>
-        <span>#{ranks.all.rank ?? "–"} of {ranks.all.of} all time</span>
-        <span>synced {ago(player.last_sync_at)} · run <code>/token-metrics:dashboard</code> to refresh</span>
-      </p>
+      <Hero data={data} handle={handle} synced={ago(player.last_sync_at)} />
 
       {!hasData && (
         <p className="panel">No stats yet. Run <code>/token-metrics:dashboard</code> in Claude Code to send your first sync.</p>
@@ -67,13 +62,7 @@ export function Dashboard({ data, handle }: { data: Data; handle: string }) {
         <div className="tile"><span>By subagents</span><b>{tk.has_detail ? pct(tk.agent_share) : "–"}</b>
           <span className="delta">last 4 weeks</span></div>
       </div>
-      {tk.has_daily ? (
-        <figure className="panel chart" style={{ marginTop: 12 }}>
-          <figcaption>Tokens per day <span className="muted">· last {tk.daily.length} days</span></figcaption>
-          <WeekBars weeks={tk.daily.map((d) => d.day)} values={tk.daily.map((d) => d.tokens)} fmt={compact}
-                    label={dayLabel} every={5} width={1100} height={230} />
-        </figure>
-      ) : (
+      {!tk.has_daily && (
         <p className="panel small" style={{ marginTop: 12 }}>Daily tokens and the breakdowns below need plugin 1.5.0 or later.
           Update the plugin, then run <code>/token-metrics:dashboard</code>.</p>
       )}
@@ -177,12 +166,12 @@ export function Dashboard({ data, handle }: { data: Data; handle: string }) {
       <h2>Badges <span className="muted">{p.badges.length} earned</span></h2>
       <div className="badges">
         {p.badges.map((b) => (
-          <div key={b.id} className="badge on"><b>{b.name}</b><span>{b.description}</span></div>
+          <div key={b.id} className="badge on"><b><span className="chk">[✓]</span> {b.name}</b><span>{b.description}</span></div>
         ))}
         {p.next_badges.map((b) => (
           <div key={b.id} className="badge">
-            <b>{b.name}</b><span>{b.hint}</span>
-            <div className="lvl-track small"><div className="lvl-fill" style={{ width: `${Math.round(b.progress * 100)}%` }} /></div>
+            <b><span className="chk">[ ]</span> {b.name}</b><span>{b.hint}</span>
+            <span className="tbar"><SegBar f={b.progress} n={16} /> {Math.round(b.progress * 100)}%</span>
           </div>
         ))}
       </div>

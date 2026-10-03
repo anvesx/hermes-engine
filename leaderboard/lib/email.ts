@@ -1,20 +1,25 @@
-/** Sends the sign-in code through Resend's HTTP API. Without RESEND_API_KEY (local dev) it logs the code. */
+import nodemailer from "nodemailer";
+
+/** Sends the sign-in code over SMTP (Gmail by default, with an app password). Without SMTP_PASS (local dev) it logs the code. */
 export async function sendCode(email: string, code: string) {
-  const key = process.env.RESEND_API_KEY;
-  if (!key) {
-    if (process.env.NODE_ENV === "production") throw new Error("RESEND_API_KEY is not set");
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  if (!user || !pass) {
+    if (process.env.NODE_ENV === "production") throw new Error("SMTP_USER / SMTP_PASS are not set");
     console.log(`[dev] sign-in code for ${email}: ${code}`);
     return;
   }
-  const r = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      from: process.env.EMAIL_FROM || "Token Metrics <leaderboard@devxlabs.ai>",
-      to: [email],
-      subject: `Your token-metrics code: ${code}`,
-      text: `Your sign-in code is ${code}. It expires in 10 minutes.\n\nIf you didn't ask for it, ignore this email.`,
-    }),
+  const port = Number(process.env.SMTP_PORT || 465);
+  const transport = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port,
+    secure: port === 465,
+    auth: { user, pass },
   });
-  if (!r.ok) throw new Error(`Resend returned ${r.status}: ${await r.text()}`);
+  await transport.sendMail({
+    from: process.env.EMAIL_FROM || `Token Metrics <${user}>`,
+    to: email,
+    subject: `Your token-metrics code: ${code}`,
+    text: `Your sign-in code is ${code}. It expires in 10 minutes.\n\nIf you didn't ask for it, ignore this email.`,
+  });
 }

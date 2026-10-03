@@ -14,6 +14,7 @@ alongside your own. Data stays in `~/.claude/metrics/` unless you join the compa
 | `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display) |
 | `/token-metrics:task-report` | Metrics by category |
 | `/token-metrics:wrapped` | Your usage in numbers: tokens, API-equivalent spend, active hours, streaks, biggest leaks (local only) |
+| `/token-metrics:dashboard you@devxlabs.ai` | One step for everything: joins (emails you a code, then `/token-metrics:dashboard verify <code> <Your Name>`), syncs, and opens your personal dashboard in the browser, already signed in. Once joined, run it with no arguments |
 | `/token-metrics:join you@devxlabs.ai` | Join the company leaderboard: emails you a code, then `/token-metrics:join verify <code> <Your Name>` |
 | `/token-metrics:share` | Sync now and show your points, level, rank, badges and public card link |
 | `/token-metrics:share preview` | Exactly what syncing sends; sends nothing |
@@ -43,13 +44,30 @@ participation (an active synced week, hooks on 80%+ of sessions, tagging tasks, 
 less than your own baseline. Tokens, spend and hours are shown and earn badges, but never points. Post your public
 card link (`/token-metrics:share` prints it) and the card image previews on LinkedIn and X.
 
+`/token-metrics:dashboard` opens `/u/<your-handle>` through a one-time sign-in link (single use, 5 minutes). Signed in
+as yourself, that page is your dashboard: token usage (today, this week, last 30 days, tokens per day, split by
+type and model, subagent share), level progress, your rank this week, last 4 weeks and all time, this
+week against last week, all-time usage, 12-week charts of tokens, hours, spend, points and waste index against your
+baseline, your biggest leaks next to the company's, model mix, badges with progress, and the full leaderboard. Anyone
+else who opens the same link sees only your public card. Set `CC_METRICS_NO_BROWSER=1` to print the link instead of
+opening it.
+
+The same thing works from a plain terminal, with no Claude Code session needed. Run there, it prompts for your email,
+the emailed code and your name, so one run joins, syncs and opens the dashboard:
+
+```bash
+python3 ~/.claude/metrics/share.py dashboard
+alias tm-dashboard='python3 ~/.claude/metrics/share.py dashboard'   # optional, for your shell profile
+```
+
 ## Privacy
 
 Prompt text is not stored, only length, category and whether it looked like a correction.
 Set `CC_METRICS_KEEP_PROMPTS=1` to keep the first 500 characters.
 
 Nothing is sent anywhere until you run `/token-metrics:join`. After that, syncing sends only per-week aggregates:
-tokens, API-equivalent spend, active hours and days, session and task counts, tagged and rated task counts, model mix
-by spend, and each leak category's share of spend. It never sends prompt text, project names, file paths or session
+tokens (split into input, cache write, cache read and output, by model family and main session vs subagents), daily
+token totals for the last 8 weeks, API-equivalent spend, active hours and days, session and task counts, tagged and rated
+task counts, model mix by spend, and each leak category's share of spend. It never sends prompt text, project names, file paths or session
 ids. Your name and stats are visible on the internal leaderboard; your public card shows only the fields you leave on.
 `/token-metrics:share leave` deletes everything the server has about you.

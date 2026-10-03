@@ -120,13 +120,17 @@ You need the plugin installed (Option B above) so the hooks record your sessions
 
 ### Step 1: join
 
-1. Request a sign-in code. The leaderboard URL isn't built into the plugin yet, so pass it once; it is saved for later syncs:
+**Shortcut:** `/token-metrics:dashboard you@devxlabs.ai`, then `/token-metrics:dashboard verify <code> <Your Name>`,
+joins, syncs and opens your dashboard in the browser in one go. After that, `/token-metrics:dashboard` on its own
+refreshes your stats and reopens it. Outside Claude Code, `python3 ~/.claude/metrics/share.py dashboard` does all of
+it in one run: it asks for your email, code and name in the terminal. The steps below do the same thing one command
+at a time.
+
+1. Request a sign-in code (only `@devxlabs.ai` addresses can join):
 
    ```
-   /token-metrics:join you@devxlabs.ai --url https://<leaderboard-url>
+   /token-metrics:join you@devxlabs.ai
    ```
-
-   (Or set `CC_METRICS_SHARE_URL=https://<leaderboard-url>` in your environment.)
 
 2. Enter the emailed code and the name to show on the board:
 
@@ -175,11 +179,24 @@ most, and `token-leak-categories.md` for what each one means.
 ### Step 4: check your progress
 
 ```
+/token-metrics:dashboard                    # sync now and open your dashboard in the browser (see below)
 /token-metrics:share                        # sync now; shows points, level, rank, badges and the badges you're closest to
 /token-metrics:leaderboard week             # this week's board (also: month, all)
 ```
 
-You can also sign in on the leaderboard website with your company email.
+You can also sign in at https://token-metrics-leaderboard.vercel.app with your company email.
+
+The dashboard opens already signed in, through a link that works once for 5 minutes. It shows:
+- token usage first: today, this week, the last 30 days, per active day and all time, a tokens-per-day chart, what
+  the tokens are (input, cache write, cache read, output), tokens by model, and the share used by subagents
+- your level progress and your rank this week, over the last 4 weeks and all time
+- this week against last week
+- all-time tokens, spend, hours, days, sessions and tasks
+- 12-week charts of usage, points and waste index against your baseline
+- your biggest leaks next to the company's, and your model mix
+- every badge with your progress toward it, and the full leaderboard
+
+It lives at your card's address, `/u/<handle>`, but only you see the dashboard there. Everyone else sees the public card.
 
 ### Step 5: share your card (optional)
 
@@ -202,5 +219,5 @@ image with your name, level, badges, streak, tokens, hours and spend. Choose wha
   `~/.claude/metrics/events.jsonl` exists and is growing.
 - **Slash command can't find a script:** start a new session so the hook copies the scripts to `~/.claude/metrics/`,
   or run them from the repo as in Option A.
-- **`no leaderboard URL configured`:** pass `--url https://<leaderboard-url>` to `/token-metrics:join`, or set
-  `CC_METRICS_SHARE_URL`.
+- **`no leaderboard URL configured`:** your plugin copy is older than 1.4.1. Start a new session so the hook
+  copies the updated scripts, or pass `--url https://token-metrics-leaderboard.vercel.app` to `/token-metrics:join`.

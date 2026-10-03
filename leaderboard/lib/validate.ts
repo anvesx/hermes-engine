@@ -15,16 +15,24 @@ export type Week = {
   model_cost: Record<string, number>;
   leak_share: Record<string, number>;
   waste_index: number;
+  // added in plugin 1.5.0; empty for weeks synced by older clients
+  token_split: Partial<Record<TokenKind, number>>;
+  model_tokens: Record<string, number>;
+  agent_tokens: number;
 };
 
+export const TOKEN_KINDS = ["input", "cache_write", "cache_read", "output"] as const;
+export type TokenKind = (typeof TOKEN_KINDS)[number];
+export type Day = { day: string; tokens: number; cost_usd: number; active_hours: number };
+
 export type Lifetime = Omit<Week, "week"> & { first_day: string | null; longest_streak_days: number };
-export type Payload = { client: string; lifetime: Lifetime; weeks: Week[] };
+export type Payload = { client: string; lifetime: Lifetime; weeks: Week[]; days: Day[] };
 
 const FAMILIES = ["fable", "opus", "sonnet", "haiku", "other"];
 // per-week ceilings; lifetime numbers are allowed 60x (about a year of weeks)
 const LIMITS: Record<string, number> = {
   tokens: 1e12, cost_usd: 1e6, active_hours: 168, active_days: 7, sessions: 10_000, hook_sessions: 10_000,
-  tasks: 50_000, tagged_tasks: 50_000, rated_tasks: 50_000, waste_index: 50, longest_streak_days: 3660,
+  tasks: 50_000, tagged_tasks: 50_000, rated_tasks: 50_000, waste_index: 50, longest_streak_days: 3660, day_hours: 24,
 };
 
 class Invalid extends Error {}
@@ -45,11 +53,17 @@ function shareMap(v: unknown): Record<string, number> {
   return out;
 }
 
-function costMap(v: unknown, scale: number): Record<string, number> {
+function costMap(v: unknown, scale: number, field = "cost_usd"): Record<string, number> {
   if (!v || typeof v !== "object") return {};
   const out: Record<string, number> = {};
-  for (const [k, x] of Object.entries(v)) if (FAMILIES.includes(k)) out[k] = num(x, "cost_usd", scale);
+  for (const [k, x] of Object.entries(v)) if (FAMILIES.includes(k)) out[k] = num(x, field, scale);
   return out;
+}
+
+function splitMap(v: unknown, scale: number): Partial<Record<TokenKind, number>> {
+  if (!v || typeof v !== "object") return {};
+  const raw = v as Record<string, unknown>;
+  return Object.fromEntries(TOKEN_KINDS.filter((k) => k in raw).map((k) => [k, Math.round(num(raw[k], "tokens", scale))]));
 }
 
 function block(raw: Record<string, unknown>, scale: number, where: string) {
@@ -70,12 +84,17 @@ function block(raw: Record<string, unknown>, scale: number, where: string) {
     model_cost: costMap(raw.model_cost, scale),
     leak_share: shareMap(raw.leak_share),
     waste_index: num(raw.waste_index ?? 0, "waste_index", 1),
+    token_split: splitMap(raw.token_split, scale),
+    model_tokens: costMap(raw.model_tokens, scale, "tokens"),
+    agent_tokens: Math.round(num(raw.agent_tokens ?? 0, "tokens", scale)),
     };
   } catch (e) {
     throw e instanceof Invalid ? new Invalid(`${where}: ${e.message}`) : e;
   }
   // counts that can't exceed each other; clients report their own numbers, so keep them plausible
-  if (b.hook_sessions > b.sessions || b.tagged_tasks > b.tasks || b.rated_tasks > 3 * b.tasks + 3)
+  const split = Object.values(b.token_split).reduce((a, n) => a + n, 0);
+  if (b.hook_sessions > b.sessions || b.tagged_tasks > b.tasks || b.rated_tasks > 3 * b.tasks + 3
+      || split > b.tokens * 1.01 + 1 || b.agent_tokens > b.tokens)
     throw new Invalid(`${where}: inconsistent counts`);
   return b;
 }
@@ -101,7 +120,16 @@ export function parsePayload(raw: unknown): Payload {
     const lifetime = { ...block(life, 60, "lifetime"), first_day: first,
                        longest_streak_days: Math.round(num(life.longest_streak_days ?? 0, "longest_streak_days", 1)) };
     const client = typeof p.client === "string" ? p.client.slice(0, 40) : "unknown";
-    return { client, lifetime, weeks };
+    if (p.days !== undefined && (!Array.isArray(p.days) || p.days.length > 62)) throw new Invalid("days must be a list of at most 62");
+    const seenDays = new Set<string>();
+    const days = ((p.days ?? []) as unknown[]).map((d) => {
+      const r = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+      if (typeof r.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(r.day) || seenDays.has(r.day)) throw new Invalid("bad day");
+      seenDays.add(r.day);
+      return { day: r.day, tokens: Math.round(num(r.tokens, "tokens", 1)), cost_usd: num(r.cost_usd, "cost_usd", 1),
+               active_hours: num(r.active_hours, "day_hours", 1) };
+    });
+    return { client, lifetime, weeks, days };
   } catch (e) {
     if (e instanceof Invalid) throw new PayloadError(e.message);
     throw e;

@@ -27,7 +27,7 @@ export default async function Leaderboard({ searchParams }: { searchParams: Prom
         </div>
         <form action="/api/auth/logout" method="post" className="row">
           {isAdmin(user) && <Link href="/admin">Admin</Link>}
-          <Link href={`/u/${user.handle}`}>My card</Link>
+          <Link href={`/u/${user.handle}`}>My dashboard</Link>
           <button className="link">Sign out</button>
         </form>
       </div>

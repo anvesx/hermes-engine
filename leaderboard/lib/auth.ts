@@ -13,6 +13,7 @@ export type User = {
   handle: string;
   card_fields: Record<string, boolean>;
   lifetime: Record<string, unknown> | null;
+  days: { day: string; tokens: number; cost_usd: number; active_hours: number }[] | null;
   created_at: Date;
 };
 

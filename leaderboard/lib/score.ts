@@ -31,7 +31,7 @@ export type Profile = {
   baseline: number | null;
   volume: { tokens: number; cost_usd: number; active_hours: number; sessions: number };
   badges: { id: string; name: string; description: string }[];
-  next_badges: { id: string; name: string; hint: string }[];
+  next_badges: { id: string; name: string; hint: string; progress: number }[];
 };
 
 const active = (w: Week) => w.sessions > 0;
@@ -149,13 +149,13 @@ export function scoreUser(weeks: Week[], lifetime: Lifetime | null, joinedAt: Da
   };
   const ctx: BadgeCtx = { weeks, joined, scores, p, companyCat1 };
   const badges: Profile["badges"] = [];
-  const next: (Profile["next_badges"][number] & { frac: number })[] = [];
+  const next: Profile["next_badges"] = [];
   for (const b of BADGES) {
     const [have, need] = b.progress(ctx);
     if (have >= need) badges.push({ id: b.id, name: b.name, description: b.description });
-    else next.push({ id: b.id, name: b.name, frac: have / need,
+    else next.push({ id: b.id, name: b.name, progress: Math.min(1, have / need),
                      hint: b.unit ? `${compact(have)}/${compact(need)} ${b.unit}` : b.description });
   }
-  next.sort((a, b) => b.frac - a.frac);
-  return { ...p, badges, next_badges: next.map(({ frac, ...b }) => b) };
+  next.sort((a, b) => b.progress - a.progress);
+  return { ...p, badges, next_badges: next };
 }

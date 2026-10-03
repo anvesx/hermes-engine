@@ -31,7 +31,7 @@ To test the hook, pipe a hook payload into it. Set `CC_METRICS_DIR` so it writes
 echo '{"hook_event_name":"UserPromptSubmit","session_id":"x","prompt":"rate 3 ok"}' | CC_METRICS_DIR=/tmp/m python3 plugins/token-metrics/scripts/metrics_hook.py
 ```
 
-To work on the leaderboard locally, use Postgres and point the plugin at the dev server. Without `RESEND_API_KEY`, sign-in codes are printed to the server log:
+To work on the leaderboard locally, use Postgres and point the plugin at the dev server. Without `SMTP_USER`/`SMTP_PASS`, sign-in codes are printed to the server log:
 
 ```bash
 cd leaderboard && npm install
@@ -69,6 +69,7 @@ Detectors call `add_finding(...)` / `add(...)`:
 - `stats.py` runs the leak detectors once over all history, then splits the results into per-ISO-week buckets using local time:
   - Tokens, spend, active hours and active days go to the week each call happened in.
   - Session and task counts, and the leak shares, go to the week the session started in.
+  - Since 1.5.0 each week and the lifetime block also carry `token_split`, `model_tokens` and `agent_tokens`, and the payload has a `days` list (last 56 days of token totals). These are optional in `validate.ts`, so `SCHEMA` stays 1; the server keeps `days` in `users.days`.
 - `share.py` holds the user's token in `share.json` (mode 0600). It sends `stats.py`'s payload to `POST /api/sync`.
 - On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
 - The payload must never contain prompt text, project names, file paths or session ids.
@@ -81,6 +82,7 @@ Detectors call `add_finding(...)` / `add(...)`:
 - Volume (tokens, spend, hours) earns cosmetic badges but never points.
 - Auth works by email code. `/api/auth/verify` issues a token per sign-in; CLI tokens go in the Bearer header, web tokens in the `tm_session` cookie. Only SHA-256 hashes of tokens and codes are stored.
 - Public pages are `/u/[handle]` and `/u/[handle]/card.png`, which renders with `next/og`. They show only the fields enabled in the user's `card_fields`. Everything else requires sign-in. `/admin` is limited to `ADMIN_EMAILS`.
+- `/u/[handle]` doubles as the owner's dashboard: signed in as that user (and without `?public=1`), it renders `app/u/[handle]/dashboard.tsx` from `lib/dashboard.ts` instead of the public card. `/token-metrics:dashboard` (`share.py dashboard`) gets there by calling `POST /api/auth/link`, which returns a single-use, 5-minute link; `GET /api/auth/link?t=…` spends it, sets the web session cookie and redirects. Links live in the `login_links` table, so rerun `npm run db:init` after deploying.
 
 **Cost model.** Per-call token counts come from transcript `usage` and are exact. The size of individual items is estimated at 4 chars/token; images use their pixel dimensions. A leaked item is charged at the cache-read price on every later call that re-reads it, until the next compaction. Prices are API list prices.
 

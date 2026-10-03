@@ -11,6 +11,9 @@ and each leak category's share of spend. No prompt text, project names, file pat
   python3 share.py verify 123456 "Your Name"     # finishes joining; background sync starts
   python3 share.py sync [--force]                # send now (the hook does this for you)
   python3 share.py me                            # points, level, rank, badges, card link
+  python3 share.py dashboard [you@devxlabs.ai | verify <code> "Your Name"]
+                                                 # join if needed, sync, open your dashboard in the browser.
+                                                 # In a terminal it prompts for the code, so one run does it all.
   python3 share.py leaderboard [--period week|month|all]
   python3 share.py card --hide spend,name        # choose what your public card shows
   python3 share.py leave                         # delete your data on the server and stop syncing
@@ -20,16 +23,18 @@ The server URL comes from CC_METRICS_SHARE_URL, else DEFAULT_URL below.
 import argparse
 import json
 import os
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from datetime import datetime
 
 import stats
 
-CLIENT = "token-metrics/1.3.0"
-DEFAULT_URL = None                  # set to the deployed leaderboard URL before rolling out
+CLIENT = "token-metrics/1.5.0"
+DEFAULT_URL = "https://token-metrics-leaderboard.vercel.app"
 DOMAIN = "devxlabs.ai"
 SYNC_EVERY_S = 60 * 60
 LOCK_STALE_S = 10 * 60
@@ -75,6 +80,18 @@ def base_url(cfg):
     return url.rstrip("/")
 
 
+def tls_context():
+    # python.org builds on macOS ship with an empty CA store until "Install Certificates" is run;
+    # fall back to the system bundle so HTTPS works without that step
+    ctx = ssl.create_default_context()
+    if not ctx.cert_store_stats().get("x509_ca"):
+        for cafile in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+            if os.path.exists(cafile):
+                ctx.load_verify_locations(cafile)
+                break
+    return ctx
+
+
 def call(cfg, method, path, body=None, auth=True):
     headers = {"Content-Type": "application/json", "User-Agent": CLIENT}
     if auth:
@@ -84,7 +101,7 @@ def call(cfg, method, path, body=None, auth=True):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base_url(cfg) + path, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=20, context=tls_context()) as r:
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
@@ -115,30 +132,40 @@ def cmd_preview(a, cfg):
 
 
 def cmd_join(a, cfg):
-    email = a.email.strip().lower()
+    start_join(cfg, a.email, a.url, '/token-metrics:join verify <code> "Your Name"')
+
+
+def start_join(cfg, email, url, finish):
+    email = email.strip().lower()
     if not email.endswith("@" + DOMAIN):
         raise Fail(f"use your @{DOMAIN} work email")
-    if a.url:
-        cfg["url"] = a.url.rstrip("/")
+    if url:
+        cfg["url"] = url.rstrip("/")
     call(cfg, "POST", "/api/auth/start", {"email": email}, auth=False)
     cfg["email"] = email
     cfg.pop("token", None)
     save(cfg)
     print(f"A 6-digit code is on its way to {email}.\n")
     print("Joining shares, from now on and automatically about once an hour:")
-    print("  weekly tokens, API-equivalent spend, active hours, active days, session/task counts,")
-    print("  tagged and rated task counts, model mix by spend, and each leak category's share of spend.")
+    print("  weekly tokens (split by type, model and subagents), daily token totals, API-equivalent spend, active hours")
+    print("  and days, session/task counts, tagged and rated task counts, model mix by spend, and each leak category's share.")
     print("It never shares prompt text, project names, file paths or session ids.")
     print("See the exact data with `share.py preview`. Your name and stats appear on the internal leaderboard;")
     print(f"your public card shows {', '.join(CARD_FIELDS)} until you hide some with `share.py card --hide ...`.\n")
-    print('To agree and finish: /token-metrics:join verify <code> "Your Name"')
+    print(f"To agree and finish: {finish}")
 
 
 def cmd_verify(a, cfg):
+    verify(cfg, a.code, a.name)
+    show_me(cfg)
+
+
+def verify(cfg, code, name_parts):
+    """Finishes joining with the emailed code, then sends the first sync."""
     if not cfg.get("email"):
         raise Fail("run `share.py join you@" + DOMAIN + "` first")
-    name = " ".join(a.name).strip() or cfg["email"].split("@")[0]
-    r = call(cfg, "POST", "/api/auth/verify", {"email": cfg["email"], "code": a.code.strip(), "display_name": name},
+    name = " ".join(name_parts).strip().strip("\"'").strip() or cfg["email"].split("@")[0]
+    r = call(cfg, "POST", "/api/auth/verify", {"email": cfg["email"], "code": code.strip(), "display_name": name},
              auth=False)
     cfg.update(token=r["token"], handle=r.get("handle"), display_name=name,
                consent_at=datetime.now().astimezone().isoformat(timespec="seconds"), last_sync=0)
@@ -148,7 +175,6 @@ def cmd_verify(a, cfg):
         sync(cfg, force=True)
     except Fail as e:
         print(f"The first sync failed ({e}); it will retry when a session ends, or run /token-metrics:share.")
-    show_me(cfg)
 
 
 def sync(cfg, force=False):
@@ -191,9 +217,15 @@ def show_me(cfg):
     lv = me.get("level", {})
     print(f"\n{me.get('display_name')}  -  level {lv.get('level')} ({lv.get('title')}), {me.get('points', 0):,} points")
     print(f"rank #{me.get('rank')} of {me.get('players')} this week  |  streak {me.get('streak_weeks', 0)} weeks")
+    w = me.get("this_week") or {}
+    if w:
+        split = w.get("token_split") or {}
+        cached = f" ({stats.fmt_tokens(split['cache_read'])} of them cache reads)" if split.get("cache_read") else ""
+        print(f"this week: {stats.fmt_tokens(w.get('tokens', 0))} tokens{cached}, {w.get('active_hours', 0):,.1f} active hours, "
+              f"${w.get('cost_usd', 0):,.2f}")
     v = me.get("volume", {})
-    print(f"{stats.fmt_tokens(v.get('tokens', 0))} tokens, {v.get('active_hours', 0):,.1f} active hours, "
-          f"${v.get('cost_usd', 0):,.2f} API-equivalent spend (all time)")
+    print(f"all time:  {stats.fmt_tokens(v.get('tokens', 0))} tokens, {v.get('active_hours', 0):,.1f} active hours, "
+          f"${v.get('cost_usd', 0):,.2f} API-equivalent spend")
     badges = me.get("badges", [])
     if badges:
         print("badges: " + ", ".join(b["name"] for b in badges))
@@ -202,10 +234,95 @@ def show_me(cfg):
         print("next: " + "; ".join(f"{b['name']} ({b['hint']})" for b in nxt[:3]))
     if me.get("profile_url"):
         print(f"\npublic card: {me['profile_url']}  (post this link; the card image previews automatically)")
+    return me
 
 
 def cmd_me(a, cfg):
     show_me(cfg)
+
+
+def cmd_dashboard(a, cfg):
+    args = a.args
+    if args and args[0] == "verify":
+        if len(args) < 2:
+            raise Fail('usage: /token-metrics:dashboard verify <code> "Your Name"')
+        verify(cfg, args[1], args[2:])
+        cfg = load()
+    elif not cfg.get("token"):
+        if sys.stdin.isatty():
+            join_interactively(cfg, args[0] if args else None)
+            cfg = load()
+        elif args and "@" in args[0]:
+            start_join(cfg, args[0], None, '/token-metrics:dashboard verify <code> "Your Name"')
+            return
+        else:
+            raise Fail(f"you haven't joined yet: run /token-metrics:dashboard you@{DOMAIN}")
+    else:
+        try:
+            print("Synced your latest stats." if sync(cfg, force=True) else "Another sync is running; showing the last one.")
+        except Fail as e:
+            print(f"Sync failed ({e}); showing your last synced stats.")
+    me = show_me(cfg)
+    open_dashboard(cfg, me)
+
+
+def ask(prompt, default=""):
+    try:
+        answer = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise Fail("cancelled")
+    return answer or default
+
+
+def join_interactively(cfg, email):
+    """Terminal only: request the code, then prompt for it, so one run joins, syncs and opens the dashboard."""
+    email = email or ask(f"Work email (@{DOMAIN}): ")
+    start_join(cfg, email, None, "enter the code below.")
+    cfg = load()
+    # the code first: it's what people type right after "a code is on its way"
+    code = ask_code()
+    default = cfg["email"].split("@")[0]
+    name = ask(f"Name to show on the board [{default}]: ", default)
+    while name.replace(" ", "").isdigit():
+        name = ask(f"That looks like a number, not a name. Name to show on the board [{default}]: ", default)
+    for attempt in range(3):
+        try:
+            verify(cfg, code, [name])
+            return
+        except Fail as e:
+            if "wrong code" not in str(e) or attempt == 2:
+                raise
+            print(f"{e}; try again.")
+            code = ask_code()
+
+
+def ask_code():
+    while True:
+        code = ask("6-digit code from the email: ").replace(" ", "")
+        if code.isdigit() and len(code) == 6:
+            return code
+        print("The code is the 6 digits from the email.")
+
+
+def open_dashboard(cfg, me):
+    """Opens the dashboard through a one-time link that signs the browser in, so no email code is needed."""
+    try:
+        r = call(cfg, "POST", "/api/auth/link")
+    except Fail as e:
+        print(f"\nCould not create a sign-in link ({e}). Open {me.get('profile_url')} and sign in with your email.")
+        return
+    opened = False
+    if not os.environ.get("CC_METRICS_NO_BROWSER"):
+        try:
+            opened = webbrowser.open(r["url"])
+        except Exception:
+            opened = False
+    if opened:
+        print(f"\nOpened your dashboard in the browser: {r['dashboard_url']}")
+    else:
+        print(f"\nOpen your dashboard (this sign-in link works once, for {r.get('expires_in_s', 300) // 60} minutes):")
+        print(r["url"])
 
 
 def cmd_leaderboard(a, cfg):
@@ -254,6 +371,8 @@ def main():
     p.add_argument("--force", action="store_true")
     p.add_argument("--background", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("me")
+    p = sub.add_parser("dashboard")
+    p.add_argument("args", nargs="*", help='you@devxlabs.ai to join, or: verify <code> "Your Name"')
     p = sub.add_parser("leaderboard")
     p.add_argument("--period", choices=["week", "month", "all"], default="week")
     p.add_argument("--top", type=int, default=15)

@@ -41,3 +41,15 @@ CREATE TABLE IF NOT EXISTS weekly_stats (
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (user_id, week)
 );
+
+-- one-time links the CLI opens in the browser to sign the website in (`share.py dashboard`)
+CREATE TABLE IF NOT EXISTS login_links (
+  token_hash TEXT PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  used       BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- added in 1.5.0: the latest payload's per-day token totals (a rolling window, replaced on each sync)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS days JSONB;

@@ -28,7 +28,8 @@ export async function POST(req: Request) {
   }
   await q("UPDATE login_codes SET used = true WHERE id = $1", [row.id]);
 
-  const name = typeof body.display_name === "string" ? body.display_name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+  let name = typeof body.display_name === "string" ? body.display_name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
+  if (/^[\d\s]+$/.test(name)) name = "";   // a pasted sign-in code, not a name
   let user = await one<{ id: string; handle: string; display_name: string }>("SELECT id, handle, display_name FROM users WHERE email = $1", [email]);
   if (!user) {
     user = await one("INSERT INTO users (email, display_name, handle) VALUES ($1, $2, $3) RETURNING id, handle, display_name",

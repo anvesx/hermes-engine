@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -8,6 +8,10 @@ export default function Login() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("expired"))
+      setError("That sign-in link expired or was already used. Run /token-metrics:dashboard again, or sign in here.");
+  }, []);
 
   async function post(path: string, body: object) {
     setBusy(true);

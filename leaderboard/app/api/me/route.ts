@@ -2,6 +2,7 @@ import { currentUser } from "@/lib/auth";
 import { loadPlayers, publicBase, rank } from "@/lib/board";
 import { q } from "@/lib/db";
 import { BodyError, fail, ok, readJson } from "@/lib/http";
+import { weekKey } from "@/lib/weeks";
 
 const CARD_FIELDS = ["name", "level", "badges", "streak", "tokens", "hours", "spend"];
 
@@ -19,6 +20,8 @@ export async function GET() {
     volume: p.volume, badges: p.badges, next_badges: p.next_badges, recent: p.scores.slice(-4),
     card_fields: user.card_fields, profile_url: `${publicBase()}/u/${user.handle}`,
     last_sync_at: me.last_sync_at,
+    this_week: (({ tokens, cost_usd, active_hours, token_split }) => ({ tokens, cost_usd, active_hours, token_split }))(
+      me.weeks.find((w) => w.week === weekKey(new Date())) ?? { tokens: 0, cost_usd: 0, active_hours: 0, token_split: {} }),
   });
 }
 

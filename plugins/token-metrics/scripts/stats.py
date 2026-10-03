@@ -6,7 +6,9 @@ stats.py - your Claude Code usage in numbers ("Wrapped"), and the aggregate payl
   python3 stats.py --json          # the exact payload share.py would send (nothing is sent)
   python3 stats.py --weeks 4       # payload covers the last 4 weeks (default 8)
 
-The payload holds aggregates only: per-week totals and each leak category's share of spend.
+The payload holds aggregates only: per-week totals (tokens split into input / cache write / cache read / output,
+by model family and main session vs subagents), per-day token totals for the last DAILY_DAYS days, and each
+leak category's share of spend.
 No prompt text, project names, file paths or session ids leave this machine.
 
 Sessions are analysed once with leak_report.py's detectors, then each session (and its findings)
@@ -25,6 +27,8 @@ import leak_report
 SCHEMA = 1
 ACTIVE_GAP_S = 5 * 60          # a gap between calls/prompts longer than this counts as a break
 PAYLOAD_WEEKS = 8
+DAILY_DAYS = 56
+SPLIT = (("input", "in"), ("cache_write", "cw"), ("cache_read", "cr"), ("output", "out"))
 FAMILIES = ("fable", "opus", "sonnet", "haiku")
 
 
@@ -53,28 +57,36 @@ def collect(root, events):
     return findings["_sessions"], findings, ratings
 
 
-def volume_by_week(s):
-    """Tokens, cost, active time and days of one session, split by the week each call happened in,
+def volume_by(s, key=week_of):
+    """Tokens, cost, active time and days of one session, split by the week (or day) each call happened in,
     so a session left open for days doesn't pile everything onto its first week."""
-    out = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "active_s": 0.0, "days": set(), "models": defaultdict(float)})
+    out = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "active_s": 0.0, "days": set(), "models": defaultdict(float),
+                               "model_tokens": defaultdict(int), "split": Counter(), "agent_tokens": 0})
     calls = s.calls + s.helper_calls
     for c in calls:
-        v = out[week_of(c["t"])]
-        v["tokens"] += c["ctx"] + c["out"]
+        v = out[key(c["t"])]
+        n = c["ctx"] + c["out"]
+        v["tokens"] += n
         v["cost"] += c["cost"]
         v["models"][family(c["model"])] += c["cost"]
+        v["model_tokens"][family(c["model"])] += n
+        for name, f in SPLIT:
+            v["split"][name] += c[f]
+        if c["helper"]:
+            v["agent_tokens"] += n
     times = sorted([c["t"] for c in calls] + [p["t"] for p in s.prompts])
     for a, b in zip(times, times[1:]):
-        out[week_of(b)]["active_s"] += min(b - a, ACTIVE_GAP_S)
+        out[key(b)]["active_s"] += min(b - a, ACTIVE_GAP_S)
     for t in times:
-        out[week_of(t)]["days"].add(day_of(t))
+        out[key(t)]["days"].add(day_of(t))
     return out
 
 
 def session_stats(s, ratings, hook_sids):
     tasks = s.tasks()
     return {
-        "volume": volume_by_week(s),
+        "volume": volume_by(s),
+        "daily": volume_by(s, day_of),
         "tasks": len(tasks),
         "tagged": [t["category"] for t in tasks if t["by"] == "tag"],
         "rated": len(ratings.get(s.sid, [])),
@@ -135,10 +147,13 @@ def build(root, events, weeks=PAYLOAD_WEEKS):
         """Counts come from sessions ss; volume from every session's activity in volume_week (None: all)."""
         st = [per[s.sid] for s in ss]
         vols = [v for x in per.values() for wk, v in x["volume"].items() if volume_week in (None, wk)]
-        models = defaultdict(float)
+        models, model_tokens, split = defaultdict(float), defaultdict(int), Counter()
         for v in vols:
             for f, c in v["models"].items():
                 models[f] += c
+            for f, n in v["model_tokens"].items():
+                model_tokens[f] += n
+            split.update(v["split"])
         cats = Counter(c for x in st for c in x["tagged"])
         days = set().union(*(v["days"] for v in vols))
         return {
@@ -153,6 +168,9 @@ def build(root, events, weeks=PAYLOAD_WEEKS):
             "rated_tasks": sum(x["rated"] for x in st),
             "top_category": cats.most_common(1)[0][0] if cats else None,
             "model_cost": {f: round(c, 2) for f, c in sorted(models.items(), key=lambda kv: -kv[1]) if round(c, 2)},
+            "token_split": {name: split[name] for name, _ in SPLIT},
+            "model_tokens": {f: n for f, n in sorted(model_tokens.items(), key=lambda kv: -kv[1]) if n},
+            "agent_tokens": sum(v["agent_tokens"] for v in vols),
         }, days
 
     all_weeks = set(by_week) | {wk for x in per.values() for wk in x["volume"]}
@@ -163,12 +181,22 @@ def build(root, events, weeks=PAYLOAD_WEEKS):
         t["leak_share"], t["waste_index"] = leak_shares(split_findings(findings, ss), ss)
         out_weeks.append({"week": wk, **t})
 
+    cutoff = (datetime.now() - timedelta(days=DAILY_DAYS - 1)).date().isoformat()
+    daily = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "active_s": 0.0})
+    for x in per.values():
+        for d, v in x["daily"].items():
+            if d >= cutoff:
+                for k in daily[d]:
+                    daily[d][k] += v[k]
+    out_days = [{"day": d, "tokens": v["tokens"], "cost_usd": round(v["cost"], 2),
+                 "active_hours": round(v["active_s"] / 3600, 2)} for d, v in sorted(daily.items())]
+
     life, days = totals(sessions)
     life["first_day"] = min(days) if days else None
     life["longest_streak_days"] = longest_streak(days)
     life["leak_share"], life["waste_index"] = leak_shares(findings, sessions)
     return {"schema": SCHEMA, "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "lifetime": life, "weeks": out_weeks}
+            "lifetime": life, "weeks": out_weeks, "days": out_days}
 
 
 def fmt_tokens(n):
@@ -185,6 +213,9 @@ def summary(p):
              f"Since {life['first_day']}:\n",
              f"- **{fmt_tokens(life['tokens'])} tokens** in {life['sessions']} sessions",
              f"- **${life['cost_usd']:,.2f}** API-equivalent spend",
+             "- Tokens by type: " + ", ".join(f"{name.replace('_', ' ')} {fmt_tokens(n)} ({n / max(life['tokens'], 1):.0%})"
+                                              for name, n in life["token_split"].items())
+             + (f"; subagents {life['agent_tokens'] / max(life['tokens'], 1):.0%} of all tokens" if life["agent_tokens"] else ""),
              f"- **{life['active_hours']:,.1f} active hours** over {life['active_days']} days "
              f"(longest streak {life['longest_streak_days']} days)",
              f"- {life['tasks']} tasks, {life['tagged_tasks']} tagged, {life['rated_tasks']} rated"

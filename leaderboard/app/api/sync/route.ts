@@ -24,8 +24,10 @@ export async function POST(req: Request) {
         [user.id, w.week, w],
       );
     }
-    await c.query("UPDATE users SET lifetime = $1, client = $2, last_sync_at = now() WHERE id = $3",
-                  [payload.lifetime, payload.client, user.id]);
+    // daily totals are a rolling window, replaced whole; older clients send none, so keep what's there
+    await c.query(`UPDATE users SET lifetime = $1, client = $2, last_sync_at = now(),
+                     days = CASE WHEN $4::jsonb = '[]'::jsonb THEN days ELSE $4::jsonb END WHERE id = $3`,
+                  [payload.lifetime, payload.client, user.id, JSON.stringify(payload.days)]);
     await c.query("COMMIT");
   } catch (e) {
     await c.query("ROLLBACK");

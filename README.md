@@ -1,77 +1,130 @@
-# hermes-engine
+# Token Metrics for Claude Code
 
-Measures Claude Code token use and ranks "token leaks" by estimated cost. The repo has two parts:
-
-- `plugins/token-metrics/`: the Claude Code plugin and the report scripts (plain Python 3, no dependencies).
-- `leaderboard/`: the opt-in company leaderboard (Next.js on Vercel).
-
-This file covers how to get reports and how to play the leaderboard game. For what each leak category means, see
-[`token-leak-categories.md`](token-leak-categories.md). For plugin usage and privacy details, see
-[`plugins/token-metrics/README.md`](plugins/token-metrics/README.md).
+See where your Claude Code tokens go. Token Metrics tracks your token usage, time and cost per task, finds "token
+leaks" (context and work you pay for without needing it) and shows it all on a personal dashboard.
 
 ## Requirements
 
 - Python 3 (standard library only, nothing to install)
-- Claude Code, with some history in `~/.claude/projects/`
+- Claude Code
+- A `@devxlabs.ai` email address
 
-## Option A: reports straight from the repo (no setup)
+## Get started
 
-Most leaks are detected from the transcripts Claude Code already writes, so you can get a leak report right away.
-
-1. Clone the repo and open it:
+1. **Get the plugin.**
 
    ```bash
    git clone https://github.com/devx-commerce/hermes-engine
-   cd hermes-engine
    ```
 
-2. Run the leak report:
-
-   ```bash
-   python3 plugins/token-metrics/scripts/leak_report.py --days 30
-   ```
-
-3. Optionally save it as Markdown:
-
-   ```bash
-   python3 plugins/token-metrics/scripts/leak_report.py --days 30 --md leak_report.md
-   ```
-
-Task categories, ratings and idle detection need hook data, so those parts stay empty until you install the plugin (Option B).
-
-## Option B: install the plugin (full reports)
-
-1. Start Claude Code with the plugin loaded:
+2. **Start Claude Code with the plugin loaded**, then start a new session:
 
    ```bash
    claude --plugin-dir /path/to/hermes-engine/plugins/token-metrics
    ```
 
-   The plugin's hooks run alongside your own and do not change your `settings.json`.
+   The plugin runs alongside your own settings and doesn't change your `settings.json`.
 
-2. Start a new session. On SessionStart the hook copies the report scripts to `~/.claude/metrics/` and starts
-   writing events to `~/.claude/metrics/events.jsonl`.
+3. **Connect your account.** In Claude Code, run:
 
-3. Work as usual. To get per-task data:
-   - Start a task with a category tag: `[bugfix] the parser drops time zones`
-   - When it is done, rate it: `rate 3 ok` (frustration 1-5, outcome `ok` / `partial` / `fail`). The hook
-     intercepts this, so it costs no tokens.
-
-4. Get the reports from inside Claude Code:
-
-   | Command | Report |
-   |---|---|
-   | `/token-metrics:leak-report` | Token leaks for the last 30 days, ranked by cost |
-   | `/token-metrics:task-report` | Tokens, latency, frustration and success by task category |
-   | `/token-metrics:wrapped` | Your usage in numbers: tokens, spend, active hours, streaks, biggest leaks |
-
-   Or from a terminal, which uses no Claude tokens:
-
-   ```bash
-   python3 ~/.claude/metrics/leak_report.py --days 30 --md leak_report.md
-   python3 ~/.claude/metrics/analyze.py --csv tasks.csv
-   python3 ~/.claude/metrics/stats.py
    ```
+   /token-metrics:dashboard you@devxlabs.ai
+   ```
+
+   You'll get a 6-digit code by email. Finish with:
+
+   ```
+   /token-metrics:dashboard verify <code> <Your Name>
+   ```
+
+   Your dashboard opens in the browser, already signed in, with your existing history loaded.
+
+4. **Work as usual, and label your tasks.** Start a task with a category in brackets, and rate it when it's done:
+
+   ```
+   [bugfix] the parser drops time zones
+   rate 3 ok
+   ```
+
+   `rate` takes how frustrating the task was (1-5) and how it went (`ok`, `partial` or `fail`). It costs no tokens.
+
+5. **Open your dashboard any time:**
+
+   ```
+   /token-metrics:dashboard
+   ```
+
+   It syncs your latest numbers first. Your stats also sync on their own at the end of each session, at most once an hour.
+
+You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens. The first time, it asks
+for your email, the code and your name:
+
+```bash
+python3 ~/.claude/metrics/share.py dashboard
+```
+
+## Your dashboard
+
+- **Token usage:** this week, today, the last 30 days, per active day and all time; tokens per day; what the tokens
+  are (input, cache write, cache read, output); tokens by model; and how much went to subagents.
+- **Your week:** active hours, API-equivalent spend and waste index, compared with last week and with your own baseline.
+- **Trends:** 12-week charts of tokens, hours, spend and waste index.
+- **Your biggest leaks**, next to the company average.
+- **Your progress:** level, points, streak and badges, and where you stand among your colleagues.
+
+You also get a public card at `/u/<your-handle>` that you can share. It shows your name, level, badges, streak,
+tokens, hours and spend; hide any of them with `/token-metrics:share card --hide spend,name`. Only you, signed in,
+see the full dashboard at that address.
+
+## Get more out of it
+
+Points and levels follow the habits that make the numbers useful:
+
+- **Keep the plugin loaded** in every session, so all your work is measured.
+- **Label your tasks** with `[category]` and **rate them** with `rate N ok|partial|fail`, so you can see which kinds of
+  work cost the most.
+- **Cut your biggest leaks.** Each week you leak less than your own baseline earns more points. See which leaks cost
+  you most with `/token-metrics:leak-report`, and what each one means in [`token-leak-categories.md`](token-leak-categories.md).
+
+Using Claude Code more never earns points; using it with less waste does. The full rules are in [`gamify.md`](gamify.md).
+
+## Reports
+
+| Command | What you get |
+|---|---|
+| `/token-metrics:dashboard` | Sync and open your dashboard |
+| `/token-metrics:leak-report` | Token leaks for the last 30 days, ranked by cost |
+| `/token-metrics:task-report` | Tokens, time, frustration and success by task category |
+| `/token-metrics:wrapped` | Your usage in numbers: tokens, spend, active hours, streaks, biggest leaks |
+| `/token-metrics:share preview` | Exactly what syncing sends; sends nothing |
+| `/token-metrics:share leave` | Delete your data from the server and stop syncing |
+
+The same reports run from a terminal and use no Claude tokens:
+
+```bash
+python3 ~/.claude/metrics/leak_report.py --days 30 --md leak_report.md
+python3 ~/.claude/metrics/analyze.py --csv tasks.csv
+python3 ~/.claude/metrics/stats.py
+```
+
+## Privacy
+
+Nothing leaves your machine until you connect your account (step 3). After that, only weekly and daily totals are
+sent: tokens, spend, hours, task counts and leak shares. Prompts, code, project names and file paths are never sent.
+By default, your prompt text isn't stored locally either. `/token-metrics:share leave` deletes everything the server holds about
+you. Details are in [`plugins/token-metrics/README.md`](plugins/token-metrics/README.md#privacy).
+
+## Troubleshooting
+
+- **`invalid choice: 'dashboard'`:** your plugin is out of date. Pull the latest version and start a new Claude Code session.
+- **The dashboard shows zeros:** your stats haven't synced yet. Run `/token-metrics:dashboard` again and check that it
+  prints `Synced your latest stats.`
+- **The browser shows a sign-in page or only your public card:** the sign-in link expired (it works once, for 5
+  minutes), or you opened your card link directly. Run `/token-metrics:dashboard` again.
+- **No task categories or ratings:** the plugin wasn't loaded for those sessions. Check that
+  `~/.claude/metrics/events.jsonl` exists and grows as you work.
+- **A slash command can't find its script:** start a new session so the plugin can set itself up.
+- **Empty or tiny leak report:** widen the range, e.g. `--days 90`.
 
 ## Report options
 
@@ -110,114 +163,7 @@ python3 ~/.claude/metrics/leak_report.py --days 30 --all
 python3 ~/.claude/metrics/analyze.py --since 2026-10-01 --csv tasks.csv
 ```
 
-## Gamification: the company leaderboard
+## For developers
 
-Optional and opt-in: nothing leaves your machine until you join. The game rewards using the plugin well and
-leaking fewer tokens than your own baseline. Using Claude Code *more* never earns points. Full rules are in
-[`gamify.md`](gamify.md); they live in `leaderboard/lib/score.ts`.
-
-You need the plugin installed (Option B above) so the hooks record your sessions.
-
-### Step 1: join
-
-**Shortcut:** `/token-metrics:dashboard you@devxlabs.ai`, then `/token-metrics:dashboard verify <code> <Your Name>`,
-joins, syncs and opens your dashboard in the browser in one go. After that, `/token-metrics:dashboard` on its own
-refreshes your stats and reopens it. Outside Claude Code, `python3 ~/.claude/metrics/share.py dashboard` does all of
-it in one run: it asks for your email, code and name in the terminal. The steps below do the same thing one command
-at a time.
-
-1. Request a sign-in code (only `@devxlabs.ai` addresses can join):
-
-   ```
-   /token-metrics:join you@devxlabs.ai
-   ```
-
-2. Enter the emailed code and the name to show on the board:
-
-   ```
-   /token-metrics:join verify <code> <Your Name>
-   ```
-
-3. Optionally, check exactly what will be sent before anything is synced:
-
-   ```
-   /token-metrics:share preview
-   ```
-
-Joining syncs your existing history. That history sets your baseline and earns the **First Sync** badge, but
-points only count from the week you join.
-
-### Step 2: earn points every week
-
-| Do this | Points |
-|---|---|
-| Use Claude Code at least once in the week (synced automatically) | +10 |
-| Keep the plugin loaded so 80%+ of the week's sessions have hook data | +10 |
-| Start tasks with a tag, e.g. `[bugfix] the parser drops time zones` | +2 each, max 20 |
-| Rate tasks when done, e.g. `rate 3 ok` (costs no tokens) | +3 each, max 30 |
-| Leak less than your baseline (weeks with 3+ active days) | +1 per % below baseline, max 50 |
-
-A week can earn at most **120 points**. Syncing happens in the background at the end of each session, at most once an hour.
-
-To earn improvement points, cut your biggest leaks. Run `/token-metrics:leak-report` to see which ones cost you the
-most, and `token-leak-categories.md` for what each one means.
-
-### Step 3: level up, keep streaks, collect badges
-
-- **Levels** come from total points: Rookie (0), Apprentice (50), Practitioner (150), Optimizer (300),
-  Specialist (500), Expert (800), Master (1,200), Grandmaster (1,700), Legend (2,300), Mythic (3,000).
-- **Streaks** count consecutive active weeks. A week without activity yet doesn't break the streak until it ends.
-- **Badges:**
-
-  | Type | Badges |
-  |---|---|
-  | Participation | First Sync, Fully Hooked (a week with 80%+ hooked sessions), Tagger (50 tagged tasks), Honest Rater (25 rated tasks) |
-  | Efficiency | Leak Plugger (a week 25%+ below baseline), Cache Keeper (expired-cache leak under 2% of a week's spend), Lean Start (starting context below the company median) |
-  | Consistency | On a Roll (4-week streak), Unstoppable (12-week streak) |
-  | Volume (cosmetic, no points) | 100M Club, Billionaire, Token Titan, Centurion, Lifer |
-
-### Step 4: check your progress
-
-```
-/token-metrics:dashboard                    # sync now and open your dashboard in the browser (see below)
-/token-metrics:share                        # sync now; shows points, level, rank, badges and the badges you're closest to
-/token-metrics:leaderboard week             # this week's board (also: month, all)
-```
-
-You can also sign in at https://token-metrics-leaderboard.vercel.app with your company email.
-
-The dashboard opens already signed in, through a link that works once for 5 minutes. It shows:
-- token usage first: today, this week, the last 30 days, per active day and all time, a tokens-per-day chart, what
-  the tokens are (input, cache write, cache read, output), tokens by model, and the share used by subagents
-- your level progress and your rank this week, over the last 4 weeks and all time
-- this week against last week
-- all-time tokens, spend, hours, days, sessions and tasks
-- 12-week charts of usage, points and waste index against your baseline
-- your biggest leaks next to the company's, and your model mix
-- every badge with your progress toward it, and the full leaderboard
-
-It lives at your card's address, `/u/<handle>`, but only you see the dashboard there. Everyone else sees the public card.
-
-### Step 5: share your card (optional)
-
-`/token-metrics:share` prints your public card link, `/u/<handle>`. Posting it on LinkedIn or X shows a preview
-image with your name, level, badges, streak, tokens, hours and spend. Choose what it shows:
-
-```
-/token-metrics:share card --hide spend,name
-/token-metrics:share card --show spend
-```
-
-### Leaving
-
-`/token-metrics:share leave` deletes all your data from the server and stops syncing.
-
-## Troubleshooting
-
-- **Empty or tiny report:** check that `~/.claude/projects/` has `.jsonl` transcripts in the date range, or widen `--days`.
-- **No task categories or ratings:** the plugin was not loaded for those sessions. Check that
-  `~/.claude/metrics/events.jsonl` exists and is growing.
-- **Slash command can't find a script:** start a new session so the hook copies the scripts to `~/.claude/metrics/`,
-  or run them from the repo as in Option A.
-- **`no leaderboard URL configured`:** your plugin copy is older than 1.4.1. Start a new session so the hook
-  copies the updated scripts, or pass `--url https://token-metrics-leaderboard.vercel.app` to `/token-metrics:join`.
+The repo has two parts: `plugins/token-metrics/` (the plugin and report scripts, plain Python 3) and `leaderboard/`
+(the dashboard server, Next.js on Vercel). See [`CLAUDE.md`](CLAUDE.md) and [`leaderboard/README.md`](leaderboard/README.md).

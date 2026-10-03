@@ -160,6 +160,11 @@ def cache_cost(tokens, usd):
     return tokens if UNITS == "tokens" else usd
 
 
+def table_header(third):
+    unit = ("Tokens", "Share of tokens") if UNITS == "tokens" else ("Est. cost", "Share of spend")
+    return f"| # | Leak | {third} | {unit[0]} | {unit[1]} | Instances | Note |"
+
+
 def fmt_cost(x):
     return f"{x / 1e6:,.1f}M tokens" if UNITS == "tokens" else f"${x:,.2f}"
 
@@ -248,6 +253,12 @@ def prompt_words(text):
 # ------------------------------------------------------------------ loading
 
 
+class SessionMap(dict):
+    """sid -> entries inside the window. `before` maps each session that started before the window to its earlier
+    entries, which are parsed only to find where the session really started; nothing in them is charged."""
+    before = {}
+
+
 def load_sessions(root, since):
     """Group transcript entries by session; mark helper-agent entries and which agent wrote them."""
     sessions = defaultdict(list)
@@ -262,7 +273,7 @@ def load_sessions(root, since):
                     except Exception:
                         continue
                     t = ts_of(e.get("timestamp", "")) if e.get("timestamp") else None
-                    if t is None or t < since:
+                    if t is None:
                         continue
                     sid = e.get("sessionId") or os.path.splitext(os.path.basename(path))[0]
                     e["_t"], e["_n"], e["_project"] = t, n, project
@@ -271,9 +282,16 @@ def load_sessions(root, since):
                     sessions[sid].append(e)
         except OSError:
             continue
-    for evs in sessions.values():
+    out = SessionMap()
+    out.before = {}
+    for sid, evs in sessions.items():
         evs.sort(key=lambda e: (e["_t"], e["_n"]))
-    return sessions
+        inside = [e for e in evs if e["_t"] >= since]
+        if inside:
+            out[sid] = inside
+            if len(inside) < len(evs):
+                out.before[sid] = [e for e in evs if e["_t"] < since]
+    return out
 
 
 def load_hook_prompts(path):
@@ -294,7 +312,7 @@ def load_hook_prompts(path):
 
 
 class Session:
-    def __init__(self, sid, entries, write_mult, ttl_s, hook_prompts):
+    def __init__(self, sid, entries, write_mult, ttl_s, hook_prompts, before=None):
         self.sid, self.project = sid, entries[0]["_project"]
         self.write_mult, self.ttl_s = write_mult, ttl_s
         self.hook_prompts = hook_prompts
@@ -309,6 +327,14 @@ class Session:
         self._segments()
         self._calibrate()
         self._size_items()
+        # A session that started before a --days/--since window: detectors that depend on how a session or agent
+        # started use its real start, not the first call inside the window (which carries all the earlier history).
+        early = Session(sid, before, write_mult, ttl_s, {}) if before else None
+        self.cut = bool(early and early.calls)
+        self.start_ctx = early.calls[0]["ctx"] if self.cut else (self.calls[0]["ctx"] if self.calls else 0)
+        self.start_prompt = (early.prompts[0]["tokens"] if early.prompts else 0) if self.cut else \
+            (self.prompts[0]["tokens"] if self.prompts else 0)
+        self.agents_before = set(early.agents) if early else set()
 
     # -- item sizes ----------------------------------------------------------------
     def _calibrate(self):
@@ -541,8 +567,7 @@ def analyse(s: Session, findings):
         return
     tasks = s.tasks()
     first = s.calls[0]
-    first_prompt = s.prompts[0]["tokens"] if s.prompts else 0
-    prefix = max(0, first["ctx"] - first_prompt)
+    prefix = max(0, s.start_ctx - s.start_prompt)   # the session's real start, even if it began before the window
     results = sorted(s.results, key=lambda r: r["t"])
 
     def add(leak, cost, detail, ref=None, overlap=False):
@@ -613,7 +638,9 @@ def analyse(s: Session, findings):
         add(4, s.helper_cost, f"{len(s.helper_calls)} helper calls, {s.helper_cost / max(1e-9, s.cost + s.helper_cost):.0%} of session cost")
 
     # 4a. Fork context duplication: helper agents that start with the parent's context
-    for calls in s.agents.values():
+    for agent, calls in s.agents.items():
+        if agent in s.agents_before:   # started before the window: its first call here is not its start
+            continue
         first_ctx = calls[0]["ctx"]
         if first_ctx > FORK_MIN:
             add(23, (first_ctx - START_BASELINE) * sum(c["read_price"] for c in calls),
@@ -856,13 +883,13 @@ def cross_session(findings):
         for s in ss:
             # 22. Re-learning the codebase: exploring files that earlier sessions already explored
             hits = [(p, n, t) for p, n, t in s.explore if explored[p] >= RELEARN_MIN]
-            if hits:
+            if hits and not s.cut:
                 add_finding(findings, 22, s, sum(s.carry(t, n) for _, n, t in hits),
                             f"{len(hits)} files re-read before the first edit that {RELEARN_MIN}+ earlier sessions also explored")
             for p, _, _ in s.explore:
                 explored[p] += 1
             # 15. Repeated tasks across sessions: the same first request as an earlier session
-            if len(s.first_words) < 5:
+            if s.cut or len(s.first_words) < 5:   # a session cut by the window has no first request here
                 continue
             match = next((e for e in earlier
                           if len(s.first_words & e.first_words) / len(s.first_words | e.first_words) >= REPEAT_SIM), None)
@@ -935,7 +962,7 @@ def additional_table(findings, total, w, examples_for=10):
     w(f"\n## Additional categories\n")
     w(f"The canvas's other {len(rows)} categories, labelled A<canvas row>: {len(measured)} measured, "
       f"{len(leak_extra.SAME_AS)} measured by a core row, {len(rows) - len(measured) - len(leak_extra.SAME_AS)} unmeasurable.\n")
-    w("| # | Leak | Category | Est. cost | Share of spend | Instances | Note |")
+    w(table_header("Category"))
     w("|---|---|---|---|---|---|---|")
     order = lambda r: (2 if r[3] else 1 if r[0] in leak_extra.SAME_AS else 0, -r[4], r[0])
     for n, name, group, reason, cost, items in sorted(rows, key=order):
@@ -1028,7 +1055,7 @@ def curated_rows(findings, total, sessions):
 
 def curated_table(findings, total, sessions, w):
     """The 50 categories of leak_categories.py; returns example lists for the costliest rows."""
-    w("| # | Leak | Group | Est. cost | Share of spend | Instances | Note |")
+    w(table_header("Group"))
     w("|---|---|---|---|---|---|---|")
     rows = curated_rows(findings, total, sessions)
     for n, name, group, cost, items, reason, note in rows:
@@ -1045,7 +1072,7 @@ def curated_table(findings, total, sessions, w):
 
 def legacy_tables(findings, total, sessions, w, core_only):
     """The full canvas list (--all): core leaks, then the additional categories unless core_only."""
-    w("| # | Leak | Category | Est. cost | Share of spend | Instances | Note |")
+    w(table_header("Category"))
     w("|---|---|---|---|---|---|---|")
     rows = []
     for k, (label, name, group) in LEAKS.items():
@@ -1091,8 +1118,9 @@ def main():
     ttl_s, write_mult = (300, 1.25) if a.ttl == "5m" else (3600, 2.0)
     hook_prompts, _ = load_hook_prompts(a.events)
     findings = defaultdict(list)
-    for sid, entries in load_sessions(a.root, since).items():
-        analyse(Session(sid, entries, write_mult, ttl_s, hook_prompts), findings)
+    sessions = load_sessions(a.root, since)
+    for sid, entries in sessions.items():
+        analyse(Session(sid, entries, write_mult, ttl_s, hook_prompts, sessions.before.get(sid)), findings)
     if not findings["_sessions"]:
         print(f"no sessions found under {a.root}")
         return

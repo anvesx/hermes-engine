@@ -243,7 +243,7 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
     calls, results = s.calls, sorted(s.results, key=lambda r: r["t"])
     if not calls:
         return
-    first_ctx = calls[0]["ctx"]
+    first_ctx = s.start_ctx   # the real first call, even when the session began before the report window
 
     def out_cost(c, tokens):
         return tokens * price(c["model"])[1] / 1e6
@@ -287,7 +287,8 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
     streams = [calls] + list(s.agents.values())
     uncached = below = cold = unused = premium = 0.0
     n_uncached = n_below = n_unused = 0
-    for stream in streams:
+    started_before = [s.cut] + [a in s.agents_before for a in s.agents]   # first call here is not a cold start
+    for stream, before in zip(streams, started_before):
         for i, c in enumerate(stream):
             pi, _, pr = price(c["model"])
             premium += cache_cost(c["cw"], c["cw"] * pi * (c["wmult"] - 1) / 1e6)
@@ -295,7 +296,7 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
                 uncached, n_uncached = uncached + cache_cost(c["in"], c["in"] * (pi - pr) / 1e6), n_uncached + 1
             elif c["cw"] == c["cr"] == 0 and c["in"] and c["ctx"] < min_cacheable(c["model"]):
                 below, n_below = below + cache_cost(c["in"], c["in"] * (pi - pr) / 1e6), n_below + 1
-            if i == 0:
+            if i == 0 and not before:
                 cold += c["cw"] * pi * c["wmult"] / 1e6
             if c["cw"] > 1_000:
                 nxt = stream[i + 1] if i + 1 < len(stream) else None
@@ -539,7 +540,8 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
             add(lid(126), out_cost(u["call"], size) + s.carry(u["t"], size), "message sent to another agent")
         elif u["name"] == "AskUserQuestion":
             add(lid(131), u["call"]["cost"], "clarifying question asked")
-    for a in sorted(s.agents.values(), key=lambda a: a[0]["t"])[1:]:
+    fresh = [calls for agent, calls in sorted(s.agents.items(), key=lambda kv: kv[1][0]["t"]) if agent not in s.agents_before]
+    for a in (fresh if s.agents_before else fresh[1:]):
         c = a[0]
         pi, _, pr = price(c["model"])
         add(lid(125), (c["in"] * pi + c["cw"] * pi * c["wmult"] + c["cr"] * pr) / 1e6, f"helper agent startup ~{c['ctx']:,} tokens")
@@ -647,7 +649,7 @@ def cross_session(sessions, add_finding):
         ss.sort(key=lambda s: s.calls[0]["t"])
         pasted, prev, requests = set(), None, defaultdict(list)
         for s in ss:
-            if s.first_request:   # A138 the same request again, finding the same tool results
+            if s.first_request and not s.cut:   # A138 the same request again, finding the same tool results
                 for e in requests[s.first_request]:
                     same = len(s.result_hashes & e.result_hashes) / len(s.result_hashes) if len(s.result_hashes) >= 3 else 0
                     if same >= UNCHANGED_SHARE:
@@ -663,13 +665,13 @@ def cross_session(sessions, add_finding):
                             add_finding(lid(7), s, s.carry(p["t"], s.tok(len(para))), f"pasted the same ~{s.tok(len(para)):,}-token text again")
                         pasted.add(h)
             shared = {owner[u] for u in s.uuids if u in owner}
-            if shared:
+            if shared and not s.cut:
                 inherited = max(0, s.calls[0]["ctx"] - START_BASELINE)
                 add_finding(lid(9), s, inherited * s.prefix_read[-1],
                             f"forked from session {min(shared)[:8]}, inheriting ~{inherited:,} tokens")
             for u in s.uuids:
                 owner.setdefault(u, s.sid)
-            if prev and s.calls[0]["t"] - prev.calls[-1]["t"] < RESTART_GAP and s.first_edit < float("inf"):
+            if prev and not s.cut and s.calls[0]["t"] - prev.calls[-1]["t"] < RESTART_GAP and s.first_edit < float("inf"):
                 cost = sum(c["cost"] for c in s.calls if c["t"] < s.first_edit)
                 add_finding(lid(10), s, cost, f"restarted {(s.calls[0]['t'] - prev.calls[-1]['t']) / 60:.0f} min after the last session; rebuilt context before the first edit")
             prev = s

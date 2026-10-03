@@ -5,7 +5,8 @@ import { compact, hours, money, pct } from "@/lib/format";
 import { cardPath, cardVersion } from "@/lib/profile";
 import { RULES } from "@/lib/score";
 import { PointsBars, ShareBars, SplitBar, WasteLine, WeekBars } from "./charts";
-import { Hero, SegBar } from "./hero";
+import { SegBar } from "@/app/term";
+import { Hero } from "./hero";
 
 const PERIODS: [Period, string][] = [["week", "This week"], ["month", "Last 4 weeks"], ["all", "All time"]];
 const CARD_FIELDS = ["name", "level", "badges", "streak", "tokens", "hours", "spend"];

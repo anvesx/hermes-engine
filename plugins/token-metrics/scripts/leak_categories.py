@@ -76,5 +76,5 @@ CATEGORIES = {
 }
 
 REVIEW = {2, 3, 5, 6, 15, 17, 18, 26, 29}   # spend to review, not all waste
-CACHE_EVENTS = {2, 3, 4, 16, 21, 23}         # in token units: tokens written to cache, not extra tokens
+CACHE_EVENTS = {2, 3, 4, 16, 21, 23}         # in token units: tokens that missed the cache (written or uncached), not extra tokens
 EXAMPLE_ROWS = 15                            # rows that get a "largest examples" list

@@ -29,7 +29,7 @@ import leak_categories
 import leak_report
 
 FORMAT = 1
-CLIENT = "token-metrics/1.5.5"
+CLIENT = "token-metrics/1.5.6"
 CTX_BUCKETS = ((0, 100_000), (100_000, 250_000), (250_000, 500_000), (500_000, float("inf")))
 GAP_BUCKETS_MIN = ((5, 60), (60, 180), (180, 720), (720, float("inf")))   # idle gap before a full cache rewrite
 TOKEN_TYPES = (("input", "in"), ("cache_write", "cw"), ("cache_read", "cr"), ("output", "out"))
@@ -185,9 +185,12 @@ def merge(paths):
             if c["measurable"]:
                 cats[c["n"]]["usd"] += c["usd"]
                 cats[c["n"]]["shares"].append(c["share"])
+    # token categories exist only in exports from 1.5.5 on; their shares must use only those exports' tokens
+    with_tokens = [e for e in exports if "categories_tokens" in e]
+    tok_with = sum(sum(e["tokens"].values()) for e in with_tokens)
     tcats = defaultdict(lambda: {"tokens": 0, "shares": []})
-    for e in exports:
-        for c in e.get("categories_tokens", []):
+    for e in with_tokens:
+        for c in e["categories_tokens"]:
             if c["measurable"]:
                 tcats[c["n"]]["tokens"] += c["tokens"]
                 tcats[c["n"]]["shares"].append(c["share"])
@@ -223,9 +226,10 @@ def merge(paths):
                                "usd": round(v["usd"], 2), "pooled_share": round(v["usd"] / total, 4) if total else 0,
                                "share_by_contributor": spread(v["shares"])}
                               for n, v in cats.items()), key=lambda c: -c["usd"]),
+        "contributors_with_token_categories": len(with_tokens),
         "categories_tokens": sorted(({"n": n, "name": meta[n]["name"], "group": meta[n]["group"], "review": meta[n]["review"],
                                       "cache_event": n in leak_categories.CACHE_EVENTS, "tokens": v["tokens"],
-                                      "pooled_share": round(v["tokens"] / alltok, 4) if alltok else 0,
+                                      "pooled_share": round(v["tokens"] / tok_with, 4) if tok_with else 0,
                                       "share_by_contributor": spread(v["shares"])}
                                      for n, v in tcats.items()), key=lambda c: -c["tokens"]),
         "chars_per_token": {k: {"pooled_median_of_medians": q([x["median"] for x in v], 0.5),
@@ -244,7 +248,9 @@ def merge_text(m):
         lines.append(f"| {k} | {pct(m['token_share'].get(k))} | {pct(m['usd_share'].get(k))} | "
                      + (f"{pct(s['median'])} ({pct(s['p25'])}-{pct(s['p75'])})" if s else "-") + " |")
     if m["categories_tokens"]:
-        lines += ["\n| Category (tokens) | Pooled tokens | Pooled share | Share, median (IQR) across contributors |", "|---|---|---|---|"]
+        lines += [f"\nToken categories come from {m['contributors_with_token_categories']} of {m['contributors']} contributors "
+                  "(exports from token-metrics 1.5.5 on); their shares use only those contributors' tokens.",
+                  "\n| Category (tokens) | Pooled tokens | Pooled share | Share, median (IQR) across contributors |", "|---|---|---|---|"]
         for c in m["categories_tokens"][:20]:
             s = c["share_by_contributor"]
             tag = " (cache event)" if c["cache_event"] else " (review)" if c["review"] else ""

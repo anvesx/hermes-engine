@@ -155,8 +155,8 @@ def set_units(units):
 
 
 def cache_cost(tokens, usd):
-    """A cache miss sends no extra tokens: it turns cheap reads into dearer writes of the same tokens. So in token
-    units the cache detectors report the tokens written (a cache event), and in dollars the price difference."""
+    """A cache miss sends no extra tokens: the same tokens are written to the cache, or sent uncached, instead of read
+    from it. So in token units the cache detectors report those tokens (a cache event), and in dollars the price difference."""
     return tokens if UNITS == "tokens" else usd
 
 
@@ -962,7 +962,8 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
     size = f"{total / 1e6:,.1f}M tokens processed" if UNITS == "tokens" else f"API-equivalent spend ${total:,.2f}"
     w(f"{len(sessions)} sessions, {days[0]} to {days[-1]}, {size}\n" if days else "no data\n")
     if UNITS == "tokens":
-        w("Every token counts as 1. Cache categories are cache events: the tokens written to cache, not extra tokens.\n")
+        w("Every token counts as 1. Cache categories are cache events: tokens that missed the cache (written to it or "
+          "sent uncached), not extra tokens.\n")
     cal = findings["_calibration"]
     if cal:
         own = sum(1 for _, n in cal if n)
@@ -1019,7 +1020,7 @@ def curated_rows(findings, total, sessions):
         if not note and n in leak_categories.REVIEW:
             note = "spend to review, not all waste"
         if UNITS == "tokens" and n in leak_categories.CACHE_EVENTS:
-            note = "cache event: tokens written, not extra tokens"
+            note = "cache event: tokens that missed the cache, not extra tokens"
         rows.append((n, name, group, sum(i["cost"] for i in items), items, reason, note))
     rows.sort(key=lambda r: (r[5] is not None, -r[3], r[0]))
     return rows

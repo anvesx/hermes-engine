@@ -94,6 +94,41 @@ class ExactSizing(Base):
         s = self.session(tr)
         self.assertEqual([r["exact"] for r in s.results], [False, False])
 
+    def helper(self, between=None):
+        tr = (Transcript("a", agent="ag1")
+              .call(1, 20_000, 100, tools=[("h1", "Read", {})]).result(2, "h1", BIG))
+        if between:
+            between(tr)
+        tr.call(3, 20_000 + 100 + 1234 + (500 if between else 0), 50)
+        return tr
+
+    def test_a_clean_gap_inside_a_helper_agent_is_exact(self):
+        main = Transcript("a").prompt(0).call(0.5, 1_000, 10)
+        main.rows += self.helper().rows
+        r = self.session(main).helper_results[0]
+        self.assertTrue(r["exact"])
+        self.assertEqual(r["tokens"], 1234)
+
+    def test_an_attachment_in_a_helper_gap_disables_exactness(self):
+        for kind in ("file", "skill_listing", "deferred_tools_delta", "hook_additional_context"):
+            main = Transcript("a").prompt(0).call(0.5, 1_000, 10)
+            main.rows += self.helper(lambda t: t.attachment(2.5, kind)).rows
+            self.assertFalse(self.session(main).helper_results[0]["exact"], kind)
+
+    def test_an_injected_message_in_a_helper_gap_disables_exactness(self):
+        main = Transcript("a").prompt(0).call(0.5, 1_000, 10)
+        main.rows += self.helper(lambda t: t.meta(2.5, "s" * 2000, source_tool_use_id="h1")).rows
+        self.assertFalse(self.session(main).helper_results[0]["exact"])
+
+    def test_one_agents_attachment_does_not_disable_another_agents_gap(self):
+        main = Transcript("a").prompt(0).call(0.5, 1_000, 10)
+        noisy = self.helper(lambda t: t.attachment(2.5, "file"))
+        quiet = Transcript("a", agent="ag2").call(1, 20_000, 100, tools=[("q1", "Read", {})]) \
+            .result(2, "q1", BIG).call(3, 20_000 + 100 + 1234, 50)
+        main.rows += noisy.rows + quiet.rows
+        got = {r["id"]: r["exact"] for r in self.session(main).helper_results}
+        self.assertEqual(got, {"h1": False, "q1": True})
+
     def test_skill_body_loaded_in_the_gap_disables_exactness(self):
         tr = (Transcript("a").prompt(0)
               .call(1, 60_000, 100, tools=[("t1", "Skill", {"skill": "x"})]).result(2, "t1", "Launching skill")

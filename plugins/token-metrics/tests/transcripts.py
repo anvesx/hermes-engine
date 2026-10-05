@@ -16,13 +16,16 @@ class Transcript:
     """One session. Times are seconds after T0; each call's usage is given as its total context
     (all input) and output, so a test states the arithmetic it relies on."""
 
-    def __init__(self, sid, model=MODEL):
-        self.sid, self.model, self.rows, self.n = sid, model, [], 0
+    def __init__(self, sid, model=MODEL, agent=None):
+        """`agent` names a helper agent: every row is then a sidechain row of that agent."""
+        self.sid, self.model, self.agent, self.rows, self.n = sid, model, agent, [], 0
 
     def _row(self, kind, t, message, **extra):
         self.n += 1
+        if self.agent:
+            extra = {"isSidechain": True, "agentId": self.agent, **extra}
         self.rows.append({"type": kind, "timestamp": iso(T0 + t), "sessionId": self.sid,
-                          "uuid": f"{self.sid}-{self.n}", "message": message, **extra})
+                          "uuid": f"{self.sid}-{self.agent or 'main'}-{self.n}", "message": message, **extra})
 
     def prompt(self, t, text="do the thing"):
         self._row("user", t, {"role": "user", "content": text})
@@ -34,7 +37,7 @@ class Transcript:
             {"type": "tool_use", "id": i, "name": n, "input": inp} for i, n, inp in tools]
         usage = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": ctx,
                  "output_tokens": out}
-        self._row("assistant", t, {"id": f"msg-{self.sid}-{self.n}", "role": "assistant",
+        self._row("assistant", t, {"id": f"msg-{self.sid}-{self.agent or 'main'}-{self.n}", "role": "assistant",
                                    "model": model or self.model, "usage": usage, "content": content})
         return self
 
@@ -49,6 +52,14 @@ class Transcript:
         if source_tool_use_id:
             extra["sourceToolUseID"] = source_tool_use_id
         self._row("user", t, {"role": "user", "content": text}, **extra)
+        return self
+
+    def attachment(self, t, kind="file", rendered="injected text"):
+        """A record Claude Code writes for context it adds on its own (hook output, a file, a reminder)."""
+        self.n += 1
+        self.rows.append({"type": "attachment", "timestamp": iso(T0 + t), "sessionId": self.sid,
+                          "uuid": f"{self.sid}-{self.agent or 'main'}-{self.n}", "attachment": {"type": kind},
+                          "rendered": rendered, **({"isSidechain": True, "agentId": self.agent} if self.agent else {})})
         return self
 
     def compact(self, t):

@@ -329,6 +329,7 @@ class Session:
         self.compactions, self.summaries = [], []
         self.interrupts, self.uuids = [], set()
         self.meta_times = []                        # injected (isMeta) messages: they grow the context too
+        self.helper_injected = defaultdict(list)    # the same, and attachments, per helper agent
         self.attachments, self.skill_bodies = [], []   # what Claude Code injected: (t, attachment, rendered chars)
         self._parse(entries)
         self._segments()
@@ -351,9 +352,10 @@ class Session:
         the next call's context grew by the first call's output plus that result, so
         grew = result tokens = ctx(next) - ctx(call) - out(call). Images are excluded (sized from pixels)."""
         injected = sorted([t for t, _, _ in self.attachments] + self.meta_times)
-        streams = [(self.calls, self.results, self.prompts)]
-        streams += [(calls, self.helper_results, []) for calls in self.agents.values()]
-        for calls, results, prompts in streams:
+        streams = [(self.calls, self.results, self.prompts, injected)]
+        streams += [(calls, self.helper_results, [], sorted(self.helper_injected.get(agent, [])))
+                    for agent, calls in self.agents.items()]
+        for calls, results, prompts, injected in streams:
             by_id = {r["id"]: r for r in results}
             for a, b in zip(calls, calls[1:]):
                 uses = [x for x in a["blocks"] if x.get("type") == "tool_use"]
@@ -361,7 +363,7 @@ class Session:
                 if (not r or r["images"] or a["model"] != b["model"]
                         or any(a["t"] < x <= b["t"] for x in self.comp_sorted)
                         or any(a["t"] < p["t"] <= b["t"] for p in prompts)
-                        or (calls is self.calls and any(a["t"] < x <= b["t"] for x in injected))):
+                        or any(a["t"] < x <= b["t"] for x in injected)):
                     continue
                 grew = b["ctx"] - a["ctx"] - a["out"]
                 if grew > 0:
@@ -421,6 +423,8 @@ class Session:
             if e.get("type") == "attachment":
                 if not e["_helper"] and isinstance(e.get("attachment"), dict):
                     self.attachments.append((e["_t"], e["attachment"], len(str(e.get("rendered") or ""))))
+                elif e["_helper"]:
+                    self.helper_injected[e["_agent"]].append(e["_t"])
                 continue
             if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
                 if not e["_helper"]:
@@ -455,9 +459,13 @@ class Session:
                     if not e["_helper"]:
                         self.meta_times.append(e["_t"])
                         self.skill_bodies.append({"t": e["_t"], "id": e["sourceToolUseID"], "chars": text_len(content)})
+                    else:
+                        self.helper_injected[e["_agent"]].append(e["_t"])
                 elif e.get("isMeta"):
                     if not e["_helper"]:
                         self.meta_times.append(e["_t"])
+                    else:
+                        self.helper_injected[e["_agent"]].append(e["_t"])
                 elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
                     docs = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "document") if isinstance(content, list) else 0

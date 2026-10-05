@@ -263,7 +263,8 @@ class SessionMap(dict):
 def load_sessions(root, since):
     """Group transcript entries by session; mark helper-agent entries and which agent wrote them."""
     sessions = defaultdict(list)
-    for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+    seen = set()    # (session, uuid): a resumed or forked session copies its history into a second file
+    for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)):
         helper_file = "subagent" in path.lower() or os.path.basename(path).startswith("agent-")
         project = os.path.relpath(path, root).split(os.sep)[0]
         try:
@@ -277,6 +278,10 @@ def load_sessions(root, since):
                     if t is None:
                         continue
                     sid = e.get("sessionId") or os.path.splitext(os.path.basename(path))[0]
+                    if e.get("uuid"):
+                        if (sid, e["uuid"]) in seen:
+                            continue
+                        seen.add((sid, e["uuid"]))
                     e["_t"], e["_n"], e["_project"] = t, n, project
                     e["_helper"] = bool(e.get("isSidechain")) or helper_file
                     e["_agent"] = (path if helper_file else e.get("agentId") or "sidechain") if e["_helper"] else None
@@ -323,6 +328,7 @@ class Session:
         self.helper_tool_uses, self.helper_results = {}, []
         self.compactions, self.summaries = [], []
         self.interrupts, self.uuids = [], set()
+        self.meta_times = []                        # injected (isMeta) messages: they grow the context too
         self.attachments, self.skill_bodies = [], []   # what Claude Code injected: (t, attachment, rendered chars)
         self._parse(entries)
         self._segments()
@@ -341,10 +347,10 @@ class Session:
     def _clean_gaps(self):
         """(call, next call, result, grew) for every gap where the context growth is exactly one text result:
         the call ran one tool, its result is the only thing between two calls of one stream (main session or
-        one agent) on the same model, and no prompt, injected attachment or compaction came in between. Then
+        one agent) on the same model, and no prompt, injected attachment or message, or compaction came in between. Then
         the next call's context grew by the first call's output plus that result, so
         grew = result tokens = ctx(next) - ctx(call) - out(call). Images are excluded (sized from pixels)."""
-        injected = sorted(t for t, _, _ in self.attachments)
+        injected = sorted([t for t, _, _ in self.attachments] + self.meta_times)
         streams = [(self.calls, self.results, self.prompts)]
         streams += [(calls, self.helper_results, []) for calls in self.agents.values()]
         for calls, results, prompts in streams:
@@ -447,7 +453,11 @@ class Session:
                             (self.helper_results if e["_helper"] else self.results).append(self._result(e, b))
                 elif e.get("isMeta") and e.get("sourceToolUseID"):   # an invoked skill's body
                     if not e["_helper"]:
+                        self.meta_times.append(e["_t"])
                         self.skill_bodies.append({"t": e["_t"], "id": e["sourceToolUseID"], "chars": text_len(content)})
+                elif e.get("isMeta"):
+                    if not e["_helper"]:
+                        self.meta_times.append(e["_t"])
                 elif not e["_helper"] and not e.get("isMeta"):
                     txt = text_of(content)
                     docs = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "document") if isinstance(content, list) else 0

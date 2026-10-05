@@ -94,6 +94,21 @@ class ExactSizing(Base):
         s = self.session(tr)
         self.assertEqual([r["exact"] for r in s.results], [False, False])
 
+    def test_skill_body_loaded_in_the_gap_disables_exactness(self):
+        tr = (Transcript("a").prompt(0)
+              .call(1, 60_000, 100, tools=[("t1", "Skill", {"skill": "x"})]).result(2, "t1", "Launching skill")
+              .meta(2.2, "s" * 8000, source_tool_use_id="t1")
+              .call(3, 60_000 + 100 + 3000, 50))
+        r = self.session(tr).results[0]
+        self.assertFalse(r["exact"])       # the growth is the result plus the skill body, not the result
+
+    def test_injected_meta_message_in_the_gap_disables_exactness(self):
+        tr = (Transcript("a").prompt(0)
+              .call(1, 60_000, 100, tools=[("t1", "Read", {})]).result(2, "t1", BIG)
+              .meta(2.2)
+              .call(3, 60_000 + 100 + 1234, 50))
+        self.assertFalse(self.session(tr).results[0]["exact"])
+
     def test_model_switch_between_calls_disables_exactness(self):
         tr = (Transcript("a").prompt(0)
               .call(1, 60_000, 100, tools=[("t1", "Read", {})]).result(2, "t1", BIG)
@@ -203,6 +218,28 @@ class RowIsolation(Base):
         changed = self.by_session(analyse_root(self.root), "aaaaaaaa")
         self.assertEqual(base, changed[1])
         self.assertNotEqual(changed.keys() - {1}, set(), "the large result should have triggered other leaks")
+
+
+class ResumedSession(Base):
+    """Resuming or forking a session copies its history, same uuids, into a second transcript file."""
+
+    def test_a_history_copied_into_a_second_file_is_counted_once(self):
+        tr = one_tool_session("aaaaaaaa1", 1234)
+        tr.write(self.root, "original")
+        once = analyse_root(self.root)
+        self.assertTrue(once["_sessions"], "no session analysed: the comparison would measure nothing")
+        tr.write(os.path.join(self.root, "resumed"), "copy")
+        twice = analyse_root(self.root)
+        self.assertEqual(len(lr.load_sessions(self.root, 0)["aaaaaaaa1"]), len(tr.rows))
+        total = lambda f: sum(i["cost"] for k, v in f.items() if not str(k).startswith("_") for i in v)
+        self.assertGreater(total(once), 0)
+        self.assertAlmostEqual(total(once), total(twice))
+        self.assertEqual(lr.reconcile(twice), [])
+
+    def test_distinct_entries_that_share_no_uuid_are_all_kept(self):
+        one_tool_session("aaaaaaaa1", 1234).write(self.root, "p")
+        n = len(lr.load_sessions(self.root, 0)["aaaaaaaa1"])
+        self.assertEqual(n, 4)
 
 
 class Reconcile(Base):

@@ -43,6 +43,14 @@ class Transcript:
             {"type": "tool_result", "tool_use_id": tool_id, "content": text}]})
         return self
 
+    def meta(self, t, text="<system-reminder>injected</system-reminder>", source_tool_use_id=None):
+        """A message Claude Code injects on its own (isMeta): an invoked skill's body when it names a tool use."""
+        extra = {"isMeta": True}
+        if source_tool_use_id:
+            extra["sourceToolUseID"] = source_tool_use_id
+        self._row("user", t, {"role": "user", "content": text}, **extra)
+        return self
+
     def compact(self, t):
         self._row("system", t, {}, subtype="compact_boundary")
         return self

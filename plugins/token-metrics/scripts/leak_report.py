@@ -32,6 +32,7 @@ import os
 import re
 import statistics
 import struct
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -239,8 +240,8 @@ def image_tokens(block):
                     h, w = struct.unpack(">HH", raw[i + 5:i + 9])
                     break
                 i += 2 + struct.unpack(">H", raw[i + 2:i + 4])[0]
-    except Exception:
-        pass
+    except Exception:   # an unreadable image header falls back to IMAGE_DEFAULT below
+        w = h = 0
     if not w or not h:
         return IMAGE_DEFAULT
     scale = min(1.0, 1568 / max(w, h), (1_150_000 / (w * h)) ** 0.5)
@@ -337,14 +338,12 @@ class Session:
         self.agents_before = set(early.agents) if early else set()
 
     # -- item sizes ----------------------------------------------------------------
-    def _calibrate(self):
-        """Characters per token by model, measured from this session. A sample is a text tool result of
-        CALIBRATE_CHARS+ characters, the only result between two calls of one stream (main session or one
-        agent) on the same model, with no prompt, injected attachment or compaction in between. The second
-        call's context grew by exactly the first call's output plus that result, so
-        result tokens = ctx(next) - ctx(call) - out(call). A model with fewer than CALIBRATE_MIN samples
-        uses its tokenizer's default."""
-        samples = defaultdict(list)
+    def _clean_gaps(self):
+        """(call, next call, result, grew) for every gap where the context growth is exactly one text result:
+        the call ran one tool, its result is the only thing between two calls of one stream (main session or
+        one agent) on the same model, and no prompt, injected attachment or compaction came in between. Then
+        the next call's context grew by the first call's output plus that result, so
+        grew = result tokens = ctx(next) - ctx(call) - out(call). Images are excluded (sized from pixels)."""
         injected = sorted(t for t, _, _ in self.attachments)
         streams = [(self.calls, self.results, self.prompts)]
         streams += [(calls, self.helper_results, []) for calls in self.agents.values()]
@@ -353,14 +352,23 @@ class Session:
             for a, b in zip(calls, calls[1:]):
                 uses = [x for x in a["blocks"] if x.get("type") == "tool_use"]
                 r = by_id.get(uses[0].get("id")) if len(uses) == 1 else None
-                if (not r or r["images"] or r["chars"] < CALIBRATE_CHARS or a["model"] != b["model"]
+                if (not r or r["images"] or a["model"] != b["model"]
                         or any(a["t"] < x <= b["t"] for x in self.comp_sorted)
                         or any(a["t"] < p["t"] <= b["t"] for p in prompts)
                         or (calls is self.calls and any(a["t"] < x <= b["t"] for x in injected))):
                     continue
                 grew = b["ctx"] - a["ctx"] - a["out"]
-                if grew > 0 and CALIBRATE_RANGE[0] <= r["chars"] / grew <= CALIBRATE_RANGE[1]:
-                    samples[a["model"]].append(r["chars"] / grew)
+                if grew > 0:
+                    yield a, b, r, grew
+
+    def _calibrate(self):
+        """Characters per token by model, measured from this session: the large (CALIBRATE_CHARS+) clean
+        gaps of _clean_gaps whose ratio is plausible. A model with fewer than CALIBRATE_MIN samples uses
+        its tokenizer's default."""
+        samples = defaultdict(list)
+        for a, _, r, grew in self._clean_gaps():
+            if r["chars"] >= CALIBRATE_CHARS and CALIBRATE_RANGE[0] <= r["chars"] / grew <= CALIBRATE_RANGE[1]:
+                samples[a["model"]].append(r["chars"] / grew)
         self.calibration_samples = dict(samples)
         self.calibration = {m: (statistics.median(v), len(v)) for m, v in samples.items() if len(v) >= CALIBRATE_MIN}
         models = Counter(c["model"] for c in self.calls or self.helper_calls)
@@ -375,8 +383,11 @@ class Session:
         return int(chars / self.chars_per_token(model))
 
     def _size_items(self):
+        exact = {id(r): grew for _, _, r, grew in self._clean_gaps()}
         for r in self.results + self.helper_results:
-            r["tokens"] = self.tok(r["chars"], r["call"]["model"] if r["call"] else None)
+            # measured from the context growth where a clean gap allows it, else estimated from characters
+            r["exact"] = id(r) in exact
+            r["tokens"] = exact[id(r)] if r["exact"] else self.tok(r["chars"], r["call"]["model"] if r["call"] else None)
         for x in self.prompts + self.skill_bodies:
             x["tokens"] = self.tok(x["chars"])
         self.summaries = [(t, self.tok(chars)) for t, chars in self.summaries]
@@ -574,6 +585,8 @@ def analyse(s: Session, findings):
         add_finding(findings, leak, s, cost, detail, ref, overlap)
 
     findings["_calibration"].append(s.calibration.get(s.main_model, (s.chars_per_token(), 0)))
+    sized = s.results + s.helper_results
+    findings["_sizing"].append((sum(1 for r in sized if r["exact"]), len(sized)))
 
     # 1. Heavy starting context: excess over the baseline, re-read on every call
     findings["_prefix_sizes"].append(prefix)
@@ -997,10 +1010,20 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
         w(f"Item sizes (tool results, prompts, injected text) are estimated at {statistics.median(r for r, _ in cal):.2f} "
           f"characters per token (median). {own}/{len(cal)} sessions measured their own ratio from their tool results; "
           f"the rest use the tokenizer default. Per-call totals are exact.\n")
+    sizing = findings["_sizing"]
+    if sizing and sum(n for _, n in sizing):
+        ex, n = sum(e for e, _ in sizing), sum(n for _, n in sizing)
+        w(f"{ex:,} of {n:,} tool-result sizes ({100 * ex / n:.0f}%) are exact, measured from the context growth; "
+          f"the rest are estimated from characters.\n")
     if show_all:
         examples = legacy_tables(findings, total, sessions, w, core_only)
     else:
         examples = curated_table(findings, total, sessions, w)
+        flagged = distinct_flagged(findings, curated_rows(findings, total, sessions))
+        unit = "tokens" if UNITS == "tokens" else "USD"
+        w(f"\nRows overlap, so they do not add up. Spend flagged by at least one row, each tool result counted once "
+          f"and each session capped at its spend: {fmt_cost(flagged)} {unit} of {fmt_cost(total)} "
+          f"({100 * flagged / total:.1f}%).\n" if total else "")
     for label, name, items in examples:
         items = sorted(items, key=lambda i: -i["cost"])[:top]
         if items:
@@ -1051,6 +1074,60 @@ def curated_rows(findings, total, sessions):
         rows.append((n, name, group, sum(i["cost"] for i in items), items, reason, note))
     rows.sort(key=lambda r: (r[5] is not None, -r[3], r[0]))
     return rows
+
+
+class ReconcileError(ValueError):
+    """A finding or curated row that contradicts the measured spend."""
+
+
+def reconcile(findings, rows=None):
+    """Violations of the cost invariants, as strings; empty when the numbers are consistent.
+
+    1. Every finding costs a finite, non-negative amount.
+    2. Per session, no leak key charges more than the session spent (main + helper agents): a leak is a part
+       of what was spent, so it cannot exceed it. Rows overlap, so rows are checked one at a time, never summed.
+    3. Every key a curated row sums exists in the detector tables, so no row silently reads another's data."""
+    bad = []
+    spent = {s.sid[:8]: s.cost + s.helper_cost for s in findings["_sessions"]}
+    for k, items in findings.items():
+        if str(k).startswith("_"):
+            continue
+        per_session = defaultdict(float)
+        for i in items:
+            c = i["cost"]
+            if not isinstance(c, (int, float)) or c != c or c in (float("inf"), float("-inf")) or c < 0:
+                bad.append(f"leak {k}: session {i['session']} has cost {c!r}")
+                continue
+            per_session[i["session"]] += c
+        for sid, c in per_session.items():
+            if sid not in spent:
+                bad.append(f"leak {k}: session {sid} is not in the analysed sessions")
+            elif c > spent[sid] * (1 + 1e-9) + 1e-9:
+                bad.append(f"leak {k}: session {sid} charged {c:.4f} but spent {spent[sid]:.4f}")
+    known = set(LEAKS) | set(PARENT) | {lid(n) for n in leak_extra.ADDITIONAL}
+    for n, (_, _, sources) in leak_categories.CATEGORIES.items():
+        bad += [f"category {n}: source {k} is not a detector" for k in sources if k not in known]
+    return bad
+
+
+def distinct_flagged(findings, rows):
+    """Spend flagged by at least one curated row, each tool result counted once however many rows flag it
+    (the largest charge wins), and each session capped at what it spent. Rows overlap, so their sum
+    overstates the waste; this is the figure to compare with total spend."""
+    by_ref, loose = {}, defaultdict(float)
+    for _, _, _, _, items, reason, _ in rows:
+        if reason:
+            continue
+        for i in items:
+            if i["ref"]:
+                by_ref[i["ref"]] = max(by_ref.get(i["ref"], 0.0), i["cost"])
+            else:
+                loose[i["session"]] += i["cost"]
+    per_session = defaultdict(float, loose)
+    for ref, c in by_ref.items():
+        per_session[ref.split(":", 1)[0][:8]] += c
+    spent = {s.sid[:8]: s.cost + s.helper_cost for s in findings["_sessions"]}
+    return sum(min(c, spent.get(sid, c)) for sid, c in per_session.items())
 
 
 def curated_table(findings, total, sessions, w):
@@ -1126,6 +1203,10 @@ def main():
         return
     cross_session(findings)
     report(findings, a.md, a.top, a.show_all or a.core, a.core)
+    problems = reconcile(findings)
+    if problems:
+        print(f"\nRECONCILIATION FAILED ({len(problems)}):", *problems[:20], sep="\n  ", file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

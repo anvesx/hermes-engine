@@ -263,8 +263,8 @@ class SessionMap(dict):
 def load_sessions(root, since):
     """Group transcript entries by session; mark helper-agent entries and which agent wrote them."""
     sessions = defaultdict(list)
-    seen = set()    # (session, uuid): a resumed or forked session copies its history into a second file
-    for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)):
+    seen = set()    # uuids: a resumed or forked session copies its history, under the same or a new session id, into a second file
+    for path in sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True), key=lambda p: (os.path.getmtime(p), p)):
         helper_file = "subagent" in path.lower() or os.path.basename(path).startswith("agent-")
         project = os.path.relpath(path, root).split(os.sep)[0]
         try:
@@ -279,9 +279,9 @@ def load_sessions(root, since):
                         continue
                     sid = e.get("sessionId") or os.path.splitext(os.path.basename(path))[0]
                     if e.get("uuid"):
-                        if (sid, e["uuid"]) in seen:
+                        if e["uuid"] in seen:
                             continue
-                        seen.add((sid, e["uuid"]))
+                        seen.add(e["uuid"])
                     e["_t"], e["_n"], e["_project"] = t, n, project
                     e["_helper"] = bool(e.get("isSidechain")) or helper_file
                     e["_agent"] = (path if helper_file else e.get("agentId") or "sidechain") if e["_helper"] else None
@@ -1030,9 +1030,8 @@ def report(findings, md_path=None, top=3, show_all=False, core_only=False):
     else:
         examples = curated_table(findings, total, sessions, w)
         flagged = distinct_flagged(findings, curated_rows(findings, total, sessions))
-        unit = "tokens" if UNITS == "tokens" else "USD"
         w(f"\nRows overlap, so they do not add up. Spend flagged by at least one row, each tool result counted once "
-          f"and each session capped at its spend: {fmt_cost(flagged)} {unit} of {fmt_cost(total)} "
+          f"and each session capped at its spend: {fmt_cost(flagged)} of {fmt_cost(total)} "
           f"({100 * flagged / total:.1f}%).\n" if total else "")
     for label, name, items in examples:
         items = sorted(items, key=lambda i: -i["cost"])[:top]

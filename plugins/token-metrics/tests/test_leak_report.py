@@ -236,6 +236,17 @@ class ResumedSession(Base):
         self.assertAlmostEqual(total(once), total(twice))
         self.assertEqual(lr.reconcile(twice), [])
 
+    def test_a_fork_with_a_new_session_id_does_not_recharge_the_copied_rows(self):
+        tr = one_tool_session("aaaaaaaa1", 1234)
+        tr.write(self.root, "original")
+        fork = one_tool_session("bbbbbbbb1", 1234)
+        for row, src in zip(fork.rows, tr.rows):       # the fork keeps every uuid but names a new session
+            row["uuid"] = src["uuid"]
+        fork.write(self.root, "fork")
+        sessions = lr.load_sessions(self.root, 0)
+        self.assertEqual(len(sessions["aaaaaaaa1"]), len(tr.rows))
+        self.assertNotIn("bbbbbbbb1", sessions, "the fork holds only copied rows, so it has nothing of its own")
+
     def test_distinct_entries_that_share_no_uuid_are_all_kept(self):
         one_tool_session("aaaaaaaa1", 1234).write(self.root, "p")
         n = len(lr.load_sessions(self.root, 0)["aaaaaaaa1"])

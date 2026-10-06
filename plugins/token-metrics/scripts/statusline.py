@@ -13,7 +13,7 @@ Prices come from leak_report.py. The hook keeps this script and leak_report.py u
 
 Run with no arguments, it is the status line itself: it reads Claude Code's status line JSON on stdin
 and prints one right-aligned line from `prompt_cache` (Claude Code 2.1.251+; miss cause 2.1.260+):
-  warm   cache ● 1h ████░░ 37m left · chat 152k · re-read $0.03 · if cold $1.22
+  warm   cache ● 1h ████░░ 37m left · hit 91% · chat 152k · re-read $0.03 · if cold $1.22
   cold   cache ○ cold · chat 152k · next msg re-caches ≈ $1.22 · new task? /clear
 Costs are API list prices. On a subscription they show the relative weight against usage limits.
 It must never break the status line: any error prints nothing.
@@ -38,6 +38,7 @@ BAR = 6
 MARGIN = 6                # room for Claude Code's own padding, so the line never wraps
 BIG_CHAT = 300_000        # chat size where every message gets expensive: suggest /compact at a break
 CHAT_COLORS = ((600_000, RED), (500_000, YELLOW), (300_000, WHITE))   # below 300k: dim
+HIT_LOW = 0.80            # session hit rate shown in yellow below this (our choice; Claude Code defines none)
 WRITE_MULT = {"5m": 1.25, "1h": 2.0}   # cache-write price / input price, as in leak_report.WRITE_MULT
 WRAP_TIMEOUT_S = 5
 
@@ -104,6 +105,8 @@ def cache_line(data):
     left = (exp - time.time()) if exp else None
     big = bool(n and n >= BIG_CHAT)
     chat = (f"chat {k(n)}", chat_color(n)) if n else None
+    hr = pc.get("hit_ratio")
+    hit = (f"hit {round(hr * 100)}%", YELLOW if hr < HIT_LOW else DIM) if hr is not None else None
 
     if pc.get("warm") and left is not None and left > 0:
         head = "cache ●" + (f" {ttl}" if ttl else "")
@@ -111,6 +114,8 @@ def cache_line(data):
             filled = round(max(0.0, min(1.0, left / ttl_s)) * BAR)
             head += " " + "█" * filled + "░" * (BAR - filled)
         segs = [(head + " " + left_text(left), YELLOW if ttl_s and left / ttl_s < 0.2 else GREEN)]
+        if hit:
+            segs.append(hit)
         if pc.get("misses"):
             segs.append((f"misses {pc['misses']}", YELLOW))
         if chat:

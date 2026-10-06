@@ -707,7 +707,7 @@ def analyse(s: Session, findings):
             if kind == "schema error":
                 add(lid(135), wasted + s.carry(r["t"], r["tokens"]), f"{name} rejected its arguments")
         if name == "Read" and path:
-            key = (path, inp.get("offset"), inp.get("limit"))
+            key = (path, str(inp.get("offset")), str(inp.get("limit")))   # the model has sent a list as offset
             if key in seen_reads and path not in edited_since:
                 add(7, s.carry(r["t"], r["tokens"]), f"re-read {os.path.basename(path)} (~{r['tokens']:,} tokens)",
                     overlap=True)

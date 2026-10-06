@@ -1,5 +1,5 @@
 {
   "name": "token-metrics",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Measures Claude Code token use, latency, frustration and outcome per task, ranks token leaks by cost, and (opt-in) syncs aggregate stats to the company leaderboard. Until you join, data stays on your machine in ~/.claude/metrics."
 }

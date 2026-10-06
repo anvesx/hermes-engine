@@ -50,6 +50,7 @@ To try it for one session without installing: `claude --plugin-dir ~/Downloads/p
 | `/token-metrics:wrapped` | Your usage in numbers: tokens, API-equivalent spend, active hours, streaks, biggest leaks (local only) |
 | `/token-metrics:research-export` | Writes an anonymous aggregate file for the team's token-leak study (totals, shares and session sizes; no prompts, code, paths, project names or ids). `preview` prints it instead. Nothing is sent: you send the file yourself |
 | `/token-metrics:dashboard` | The company leaderboard, in one command: joins you if needed, syncs, and opens your personal dashboard in the browser (see below) |
+| `/token-metrics:statusline` | Run once to add a status line showing the prompt cache countdown, chat size and cost, with a hint (`/clear`, `/compact`) when the cache goes cold or the chat passes 300k. If you already have a status line, it asks whether to keep yours (shown above) or replace it. `off` removes it and restores yours. A plugin can't set the status line itself, so this edits your `~/.claude/settings.json` (backup saved next to it) |
 
 Free alternative from a terminal:
 

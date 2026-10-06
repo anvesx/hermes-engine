@@ -77,6 +77,8 @@ Detectors call `add_finding(...)` / `add(...)`:
 - On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
 - The payload must never contain prompt text, project names, file paths or session ids.
 
+**Status line.** `statusline.py` is the status line itself (no arguments: reads Claude Code's status line JSON on stdin and prints one right-aligned line from `prompt_cache`: countdown, chat size, re-read vs cold cost, `/clear` / `/compact` hints) and its installer (`install [keep|replace]`, `off`, run by `/token-metrics:statusline`). Plugin settings can't set the main `statusLine`, so `install` writes it into the user's `~/.claude/settings.json` (backup `.bak-token-metrics`), pointing at the synced copy in `~/.claude/metrics`. A status line the user already had is saved in `statusline.json` there: `keep` runs it and prints its output above ours, `off` restores it. Organisation managed settings override a personal `statusLine`, so `install` warns when they set one. Prices come from `leak_report.price()`; the render path must never raise.
+
 **Research export.** `research.py export` writes one anonymous JSON file for the token-leak study (`/token-metrics:research-export`); `research.py merge a.json b.json …` pools contributors' files and reports each number with its spread across contributors. Same privacy rule as the payload, plus no timestamps; per-session rows are shuffled and carry no ids. Bump `FORMAT` for breaking changes.
 
 **Leaderboard backend (`leaderboard/`).**
@@ -94,7 +96,7 @@ Detectors call `add_finding(...)` / `add(...)`:
 ## Keeping things in sync
 
 - Some definitions are copied, not shared, because each script must run alone:
-  - `PRICES` (and the cache-write multipliers) appear in both `leak_report.py` and `analyze.py`. Add new model versions to both.
+  - `PRICES` (and the cache-write multipliers) appear in both `leak_report.py` and `analyze.py`. Add new model versions to both. `statusline.py` imports them from `leak_report.py` but keeps its own copy of the two cache-write multipliers.
   - `CORRECTION_RE` and `TAG_RE` appear in both `metrics_hook.py` and `leak_report.py`.
   - `SYNC_EVERY_S` appears in both `metrics_hook.py` and `share.py`.
   - The payload schema is built by `stats.py` and validated by `leaderboard/lib/validate.ts`. Bump `SCHEMA` in both for breaking changes.

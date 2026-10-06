@@ -235,11 +235,10 @@ def install(mode):
         return 0
     if current and mode is None:
         print("You already have a status line:\n  " + str(current.get("command", current)) + "\n"
-              "Choose one and run the command again with it:\n"
-              "  keep     keep yours and show the cache line below it\n"
-              "  replace  use only the cache line (yours is saved; `off` restores it)\n"
-              "Nothing was changed.")
-        return 2
+              "Nothing was changed. Choose one:\n"
+              "  /token-metrics:statusline keep     keep yours and show the cache line below it\n"
+              "  /token-metrics:statusline replace  use only the cache line (yours is saved; `off` restores it)")
+        return 0   # not an error: a non-zero exit makes Claude Code show the command as failed
     if current:
         with open(STATE, "w") as f:
             json.dump({"mode": mode, "previous": current}, f, indent=2)

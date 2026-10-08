@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { currentUser, isAdmin } from "@/lib/auth";
+import { currentUser } from "@/lib/auth";
 import { type Period, loadPlayers, rank } from "@/lib/board";
 import { compact, hours, money } from "@/lib/format";
 
@@ -26,7 +26,7 @@ export default async function Leaderboard({ searchParams }: { searchParams: Prom
           </p>
         </div>
         <form action="/api/auth/logout" method="post" className="row">
-          {isAdmin(user) && <Link href="/admin">Admin</Link>}
+          <Link href="/admin">Team dashboard</Link>
           <Link href={`/u/${user.handle}`}>My dashboard</Link>
           <button className="link">Sign out</button>
         </form>

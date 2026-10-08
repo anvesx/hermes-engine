@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { notFound, redirect } from "next/navigation";
+import { redirect } from "next/navigation";
 import { Figlet, SegBar, TermBars, TermWindow } from "@/app/term";
 import { ShareBars, WeekBars } from "@/app/u/[handle]/charts";
 import { adminUnlocked } from "@/lib/admin";
@@ -14,12 +14,15 @@ const CATS = categories as Record<string, { name: string; group: string; review:
 const wk = (k: string) => `w${k.slice(6)}`;
 const count = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 
-export default async function Admin({ searchParams }: { searchParams: Promise<{ denied?: string; user?: string }> }) {
+// Open to everyone signed in with a work email. Emails and the CSV export are shown only to admins
+// (ADMIN_EMAILS) who have also entered the admin password; they reach the password prompt with ?unlock=1.
+export default async function Admin({ searchParams }: { searchParams: Promise<{ denied?: string; user?: string; unlock?: string }> }) {
   const user = await currentUser();
   if (!user) redirect("/login");
-  if (!isAdmin(user)) notFound();
   const sp = await searchParams;
-  if (!(await adminUnlocked())) return <Locked denied={!!sp.denied} />;
+  const admin = isAdmin(user);
+  const full = admin && (await adminUnlocked());
+  if (admin && !full && (sp.unlock || sp.denied)) return <Locked denied={!!sp.denied} />;
 
   const players = await loadPlayers();
   // ?user=<handle> scopes every number, chart and table below to one player
@@ -33,7 +36,8 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   const exportUrl = sel ? `/admin/export?user=${encodeURIComponent(sel.user.handle)}` : "/admin/export";
   const roster = players.map((p) => ({ p, s: companyStats([p], monthWeeks) })).sort((a, b) => b.s.tokens - a.s.tokens);
   const weeks = trend.map((t) => t.week);
-  const leaks = Object.entries(month.leak).filter(([, v]) => v >= 0.0005) // hide rows that print as 0.0%.sort((a, b) => b[1] - a[1]);
+  // largest first; rows that would print as 0.0% are hidden
+  const leaks = Object.entries(month.leak).filter(([, v]) => v >= 0.0005).sort((a, b) => b[1] - a[1]);
   const quiet = scope.filter((p) => !p.last_sync_at || Date.now() - new Date(p.last_sync_at).getTime() > 7 * 86400e3);
   const days = (d: Date | null) => {
     if (!d) return "never";
@@ -43,7 +47,7 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
 
   const info: [string, React.ReactNode][] = [
     ...(sel ? [
-      ["user", sel.user.email],
+      ["user", full ? sel.user.email : sel.user.display_name],
       ["level", `${sel.profile.level.level} · ${sel.profile.level.title} · ${sel.profile.points} pts`],
       ["synced", days(sel.last_sync_at)],
     ] as [string, React.ReactNode][] : [
@@ -61,11 +65,12 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   return (
     <main className="dash">
       <nav className="dnav">
-        <span className="logo"><span className="arrow">❯</span> token-metrics<span className="dim">/admin</span></span>
+        <span className="logo"><span className="arrow">❯</span> token-metrics<span className="dim">/{full ? "admin" : "team"}</span></span>
         <form action="/api/admin/lock" method="post" className="row">
           <Link href="/">cd ../leaderboard</Link>
-          <a href={exportUrl}>wget {sel ? sel.user.handle : "company"}.csv</a>
-          <button className="link">sudo -k</button>
+          {full && <a href={exportUrl}>wget {sel ? sel.user.handle : "company"}.csv</a>}
+          {full && <button className="link">sudo -k</button>}
+          {admin && !full && <Link href="/admin?unlock=1">sudo (emails &amp; csv)</Link>}
         </form>
       </nav>
 
@@ -74,7 +79,7 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
         <select id="user" name="user" defaultValue={sel?.user.handle ?? ""}>
           <option value="">* all players ({players.length})</option>
           {[...players].sort((a, b) => a.user.display_name.localeCompare(b.user.display_name)).map((p) => (
-            <option key={p.user.id} value={p.user.handle}>{p.user.display_name} · {p.user.email}</option>
+            <option key={p.user.id} value={p.user.handle}>{p.user.display_name}{full ? ` · ${p.user.email}` : ""}</option>
           ))}
         </select>
         <button type="submit">apply ⏎</button>
@@ -82,7 +87,7 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
       </form>
 
       <TermWindow label="Company results" title={`root@claude-code: ~/token-metrics/admin${sel ? `/${sel.user.handle}` : ""}`} note={cur} foot={<>
-        <span><a href={exportUrl}><kbd>/admin/export</kbd></a> download csv</span>
+        {full && <span><a href={exportUrl}><kbd>/admin/export</kbd></a> download csv</span>}
         <span className="hide-sm">leak shares are spend-weighted and overlap</span>
         <span className="ok">● {sel ? `${sel.user.display_name} · synced ${days(sel.last_sync_at)}` : `${month.active_players} active · ${month.players} joined`}<span className="cursor" /></span>
       </>}>
@@ -147,12 +152,12 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
       <h2>Players <span className="muted">{players.length} joined · last 4 weeks · click a name to filter</span></h2>
       <div className="panel scroll" style={{ padding: 8 }}>
         <table>
-          <thead><tr><th>Name</th><th>Email</th><th>Level</th><th className="num">Tokens</th><th className="num">Spend</th>
+          <thead><tr><th>Name</th>{full && <th>Email</th>}<th>Level</th><th className="num">Tokens</th><th className="num">Spend</th>
             <th className="num">Active</th><th className="num">Sessions</th><th className="num">Hooks</th><th className="num">Last sync</th></tr></thead>
           <tbody>{roster.map(({ p, s }) => (
             <tr key={p.user.id} className={p === sel ? "me" : ""}>
               <td><Link href={`/admin?user=${encodeURIComponent(p.user.handle)}`}>{p.user.display_name}</Link></td>
-              <td className="muted">{p.user.email}</td><td>{p.profile.level.level} · {p.profile.level.title}</td>
+              {full && <td className="muted">{p.user.email}</td>}<td>{p.profile.level.level} · {p.profile.level.title}</td>
               <td className="num">{compact(s.tokens)}</td><td className="num">{money(s.spend)}</td><td className="num">{hours(s.active_hours)}</td>
               <td className="num">{s.sessions}</td><td className="num">{pct(s.hook_coverage)}</td><td className="num">{days(p.last_sync_at)}</td>
             </tr>

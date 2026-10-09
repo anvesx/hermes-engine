@@ -53,3 +53,12 @@ CREATE TABLE IF NOT EXISTS login_links (
 
 -- added in 1.5.0: the latest payload's per-day token totals (a rolling window, replaced on each sync)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS days JSONB;
+
+-- one-time codes that hand a Google sign-in from the browser to the CLI (`share.py join` with no email)
+CREATE TABLE IF NOT EXISTS cli_codes (
+  code_hash  TEXT PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  used       BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);

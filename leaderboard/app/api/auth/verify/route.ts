@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
-import { MAX_CODE_ATTEMPTS, SESSION_COOKIE, newToken, normaliseEmail, sameHash, sha256, slug } from "@/lib/auth";
+import { MAX_CODE_ATTEMPTS, findOrCreateUser, issueToken, normaliseEmail, sameHash, sessionCookie, sha256 } from "@/lib/auth";
 import { publicBase } from "@/lib/board";
-import { one, q } from "@/lib/db";
+import { one } from "@/lib/db";
 import { BodyError, fail, ok, readJson } from "@/lib/http";
 
 type Body = { email?: unknown; code?: unknown; display_name?: unknown; web?: unknown };
@@ -34,21 +34,12 @@ export async function POST(req: Request) {
 
   let name = typeof body.display_name === "string" ? body.display_name.trim().replace(/\s+/g, " ").slice(0, 40) : "";
   if (/^[\d\s]+$/.test(name)) name = "";   // a pasted sign-in code, not a name
-  let user = await one<{ id: string; handle: string; display_name: string }>("SELECT id, handle, display_name FROM users WHERE email = $1", [email]);
-  if (!user) {
-    user = await one("INSERT INTO users (email, display_name, handle) VALUES ($1, $2, $3) RETURNING id, handle, display_name",
-                     [email, name || email.split("@")[0], slug(name || email.split("@")[0])]);
-  } else if (name && name !== user.display_name) {
-    await q("UPDATE users SET display_name = $1 WHERE id = $2", [name, user.id]);
-  }
+  const user = await findOrCreateUser(email, name, true);
   const web = body.web === true;
-  const token = newToken();
-  await q("INSERT INTO tokens (token_hash, user_id, kind) VALUES ($1, $2, $3)", [sha256(token), user!.id, web ? "web" : "cli"]);
+  const token = await issueToken(user.id, web ? "web" : "cli");
   if (web) {
-    (await cookies()).set(SESSION_COOKIE, token, {
-      httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 24 * 30,
-    });
+    (await cookies()).set(...sessionCookie(token));
     return ok({ signed_in: true });
   }
-  return ok({ token, handle: user!.handle, profile_url: `${publicBase()}/u/${user!.handle}` });
+  return ok({ token, handle: user.handle, profile_url: `${publicBase()}/u/${user.handle}` });
 }

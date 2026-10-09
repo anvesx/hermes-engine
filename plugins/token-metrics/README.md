@@ -16,12 +16,15 @@ Inside Claude Code:
 ```
 
 The same from a terminal: `claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine`,
-then start `claude` as usual. To join the company leaderboard, use your own work email, then the code it sends you:
+then start `claude` as usual. To join the company leaderboard, run this and sign in with your work Google account in
+the browser tab it opens:
 
 ```
-/token-metrics:dashboard you@devxlabs.ai
-/token-metrics:dashboard verify <code> Your Name
+/token-metrics:dashboard
 ```
+
+No browser? Join with an email code instead: `/token-metrics:dashboard you@devxlabs.ai`, then
+`/token-metrics:dashboard verify <code> Your Name`.
 
 To update: `/plugin marketplace update hermes-engine`, then `/plugin update token-metrics@hermes-engine` and `/reload-plugins`.
 
@@ -77,13 +80,15 @@ versions are skipped for those rows.
 One command joins, syncs and shows your results:
 
 ```
-/token-metrics:dashboard you@devxlabs.ai             # first time: emails you a 6-digit code
-/token-metrics:dashboard verify <code> <Your Name>   # joins, syncs your history, opens the dashboard
-/token-metrics:dashboard                             # every time after that: sync now and open the dashboard
+/token-metrics:dashboard                             # first time: sign in with Google, sync your history, open the dashboard
+                                                     # every time after that: sync now and open the dashboard
+/token-metrics:dashboard you@devxlabs.ai             # or join with an email code instead...
+/token-metrics:dashboard verify <code> <Your Name>   # ...and finish with the code
 ```
 
-From a terminal it needs no Claude Code session and uses no tokens. The first time, it asks for your email, the emailed
-code and your name, so one run does everything:
+Google sign-in accepts verified accounts on the company Workspace domain only. It hands the result back to a listener
+on `127.0.0.1` on your machine, so nothing is typed or pasted. From a terminal it needs no Claude Code session and uses
+no tokens:
 
 ```bash
 python3 ~/.claude/metrics/share.py dashboard
@@ -110,7 +115,7 @@ Other commands, not needed for normal use:
 | `/token-metrics:share preview` | Exactly what syncing sends; sends nothing |
 | `/token-metrics:share card --hide spend,name` | Choose what your public card shows (`name, level, badges, streak, tokens, hours, spend`) |
 | `/token-metrics:leaderboard [week\|month\|all]` | The leaderboard as a table in the terminal |
-| `/token-metrics:join you@devxlabs.ai` | Join without opening the dashboard (then `/token-metrics:join verify <code> <Your Name>`) |
+| `/token-metrics:join` | Join with Google without opening the dashboard (or `/token-metrics:join you@devxlabs.ai`, then `/token-metrics:join verify <code> <Your Name>`) |
 | `/token-metrics:share leave` | Delete your data on the server and stop syncing |
 
 ## Privacy

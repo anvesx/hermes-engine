@@ -28,16 +28,12 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 3. **Connect your account.** In Claude Code, run:
 
    ```
-   /token-metrics:dashboard you@devxlabs.ai
+   /token-metrics:dashboard
    ```
 
-   You'll get a 6-digit code by email. Finish with:
-
-   ```
-   /token-metrics:dashboard verify <code> <Your Name>
-   ```
-
-   Your dashboard opens in the browser, already signed in, with your existing history loaded.
+   Sign in with your work Google account in the browser tab that opens. Your dashboard then opens, already signed in,
+   with your existing history loaded. (Without a browser, use an email code: `/token-metrics:dashboard you@devxlabs.ai`,
+   then `/token-metrics:dashboard verify <code> <Your Name>`.)
 
 4. **Work as usual, and label your tasks.** Start a task with a category in brackets, and rate it when it's done:
 
@@ -56,8 +52,8 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
    It syncs your latest numbers first. Your stats also sync on their own at the end of each session, at most once an hour.
 
-You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens. The first time, it asks
-for your email, the code and your name:
+You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens. The first time, it signs
+you in with Google:
 
 ```bash
 python3 ~/.claude/metrics/share.py dashboard

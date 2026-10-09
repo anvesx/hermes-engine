@@ -38,7 +38,7 @@ To work on the leaderboard locally, use Postgres and point the plugin at the dev
 cd leaderboard && npm install
 DATABASE_URL=postgres://localhost/token_metrics npm run db:init        # applies db/schema.sql (idempotent)
 DATABASE_URL=... ADMIN_EMAILS=you@devxlabs.ai ADMIN_PASSWORD=<any local value> npm run dev
-CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins/token-metrics/scripts/share.py join you@devxlabs.ai
+CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins/token-metrics/scripts/share.py join you@devxlabs.ai   # email code; without the email it signs in with Google
 npm run typecheck && npm run build
 ```
 
@@ -87,7 +87,10 @@ Detectors call `add_finding(...)` / `add(...)`:
   - Participation, earned only from the user's join week onward.
   - Improvement against the user's own baseline `waste_index`, taken from their first two weeks with 3+ active days. Usually that's history synced when they joined.
 - Volume (tokens, spend, hours) earns cosmetic badges but never points.
-- Auth works by email code. `/api/auth/verify` issues a token per sign-in; CLI tokens go in the Bearer header, web tokens in the `tm_session` cookie. Only SHA-256 hashes of tokens and codes are stored.
+- Sign-in is by Google or by email code; both resolve to the same `users` row by email (`findOrCreateUser` in `lib/auth.ts`), and each sign-in issues a token. CLI tokens go in the Bearer header, web tokens in the `tm_session` cookie. Only SHA-256 hashes of tokens and codes are stored.
+  - Email code: `/api/auth/start` sends it, `/api/auth/verify` checks it.
+  - Google (`lib/google.ts`, on when `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set): OpenID Connect code flow with PKCE and a nonce. `/api/auth/google` keeps state, verifier and nonce in the short-lived `tm_oauth` cookie and redirects to Google; `/api/auth/google/callback` checks the ID token (issuer, audience, nonce, expiry, `email_verified`, `hd` in `ALLOWED_DOMAINS`). The website gets the session cookie. The plugin (`share.py join` with no email) listens on a random `127.0.0.1` port, passes `cli_port`/`cli_state`, and receives a one-time code there (`cli_codes`, 2 minutes), which it spends at `POST /api/auth/google/exchange` for a CLI token.
+  - To test Google locally without Google, `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL` and `GOOGLE_ISSUER` point at a fake provider.
 - Public pages are `/u/[handle]` and `/u/[handle]/card.png`, which renders with `next/og`. They show only the fields enabled in the user's `card_fields`. Everything else requires sign-in. `/admin` is the team dashboard, open to everyone signed in (the leaderboard links to it as "Team dashboard"). Emails and the CSV export (`/admin/export`) appear only for `ADMIN_EMAILS` who have also entered a shared password once per browser (the prompt is at `/admin?unlock=1`). The password comes only from the `ADMIN_PASSWORD` environment variable (this repo is public, so it must never be committed); without it `/admin` stays locked. The `tm_admin` cookie is `userId.expiry.hmac`, keyed by the password, valid 12 h for that one admin, and changing the password signs everyone out. `/admin/export` needs both, and prefixes cells starting with `= + - @` so names can't run as spreadsheet formulas. Sign-in codes are checked with one atomic `UPDATE … attempts < max RETURNING`, so parallel guesses can't exceed 5, and sync rejects week keys more than 60 weeks old.
 - `/u/[handle]` doubles as the owner's dashboard: signed in as that user (and without `?public=1`), it renders `app/u/[handle]/dashboard.tsx` from `lib/dashboard.ts` instead of the public card. `/token-metrics:dashboard` (`share.py dashboard`) gets there by calling `POST /api/auth/link`, which returns a single-use, 5-minute link; `GET /api/auth/link?t=…` spends it, sets the web session cookie and redirects. Links live in the `login_links` table.
 

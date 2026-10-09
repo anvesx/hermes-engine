@@ -29,7 +29,7 @@ import leak_categories
 import leak_report
 
 FORMAT = 1
-CLIENT = "token-metrics/1.5.7"
+CLIENT = "token-metrics/1.7.0"
 CTX_BUCKETS = ((0, 100_000), (100_000, 250_000), (250_000, 500_000), (500_000, float("inf")))
 GAP_BUCKETS_MIN = ((5, 60), (60, 180), (180, 720), (720, float("inf")))   # idle gap before a full cache rewrite
 TOKEN_TYPES = (("input", "in"), ("cache_write", "cw"), ("cache_read", "cr"), ("output", "out"))

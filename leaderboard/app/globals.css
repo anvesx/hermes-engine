@@ -29,6 +29,7 @@ tr.me td { background: var(--accent-soft); }
 .stat b { display: block; font-size: 24px; letter-spacing: -0.02em; }
 input, button { font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
 button { background: var(--accent); border-color: var(--accent); color: #fff; cursor: pointer; }
+a.button { font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; text-decoration: none; }
 button.link { background: none; border: none; color: var(--muted); padding: 0; text-decoration: underline; }
 .bar { height: 8px; border-radius: 4px; background: var(--accent); }
 

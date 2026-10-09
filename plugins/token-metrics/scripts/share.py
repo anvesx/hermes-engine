@@ -7,7 +7,8 @@ background at most once an hour. What is sent is exactly `python3 stats.py --jso
 and each leak category's share of spend. No prompt text, project names, file paths or session ids.
 
   python3 share.py preview                       # what would be sent; sends nothing
-  python3 share.py join you@devxlabs.ai          # emails you a 6-digit code
+  python3 share.py join                          # sign in with Google in the browser
+  python3 share.py join you@devxlabs.ai          # or: email yourself a 6-digit code
   python3 share.py verify 123456 "Your Name"     # finishes joining; background sync starts
   python3 share.py sync [--force]                # send now (the hook does this for you)
   python3 share.py me                            # points, level, rank, badges, card link
@@ -21,19 +22,22 @@ and each leak category's share of spend. No prompt text, project names, file pat
 The server URL comes from CC_METRICS_SHARE_URL, else DEFAULT_URL below.
 """
 import argparse
+import http.server
 import json
+import secrets
 import os
 import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
 
 import stats
 
-CLIENT = "token-metrics/1.5.7"
+CLIENT = "token-metrics/1.7.0"
 DEFAULT_URL = "https://token-metrics-leaderboard.vercel.app"
 DOMAIN = "devxlabs.ai"
 SYNC_EVERY_S = 60 * 60
@@ -132,7 +136,11 @@ def cmd_preview(a, cfg):
 
 
 def cmd_join(a, cfg):
-    start_join(cfg, a.email, a.url, '/token-metrics:join verify <code> "Your Name"')
+    if a.email:   # the email-code fallback
+        start_join(cfg, a.email, a.url, '/token-metrics:join verify <code> "Your Name"')
+        return
+    google_join(cfg, a.url)
+    show_me(load())
 
 
 def start_join(cfg, email, url, finish):
@@ -146,13 +154,105 @@ def start_join(cfg, email, url, finish):
     cfg.pop("token", None)
     save(cfg)
     print(f"A 6-digit code is on its way to {email}.\n")
+    print_consent()
+    print(f"To agree and finish: {finish}")
+
+
+def print_consent():
     print("Joining shares, from now on and automatically about once an hour:")
     print("  weekly tokens (split by type, model and subagents), daily token totals, API-equivalent spend, active hours")
     print("  and days, session/task counts, tagged and rated task counts, model mix by spend, and each leak category's share.")
     print("It never shares prompt text, project names, file paths or session ids.")
     print("See the exact data with `share.py preview`. Your name and stats appear on the internal leaderboard;")
     print(f"your public card shows {', '.join(CARD_FIELDS)} until you hide some with `share.py card --hide ...`.\n")
-    print(f"To agree and finish: {finish}")
+
+
+GOOGLE_WAIT_S = 90   # slash commands run under a 2-minute limit, and the first sync comes after this
+
+
+def google_available(cfg):
+    """True if the server offers Google sign-in: /api/auth/google then redirects away from our own login page.
+    Older or unconfigured servers answer 404 or redirect to /login?google=off."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=tls_context()))
+    req = urllib.request.Request(base_url(cfg) + "/api/auth/google", headers={"User-Agent": CLIENT})
+    try:
+        opener.open(req, timeout=20).close()
+        return False
+    except urllib.error.HTTPError as e:
+        return e.code in (302, 303, 307, 308) and "/login?" not in (e.headers.get("Location") or "")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise Fail(f"could not reach {base_url(cfg)}: {getattr(e, 'reason', e)}")
+
+
+def google_join(cfg, url=None):
+    """Join by signing in with Google in the browser. The server hands the result back to a one-shot listener on
+    127.0.0.1, so only this machine can receive it, and only with this run's random state; the one-time code it
+    carries is then traded for the CLI token. Nothing is typed and no email code is needed."""
+    if url:
+        cfg["url"] = url.rstrip("/")
+    if not google_available(cfg):
+        raise Fail(f"Google sign-in isn't switched on for {base_url(cfg)} yet. Join with an email code: "
+                   f"/token-metrics:dashboard you@{DOMAIN}")
+    state, got = secrets.token_urlsafe(24), {}
+
+    class Callback(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            q = urllib.parse.parse_qs(u.query)
+            good = u.path == "/callback" and q.get("state", [""])[0] == state and bool(q.get("code"))
+            if good:
+                got["code"] = q["code"][0]
+            msg = ("Signed in. You can close this tab and go back to Claude Code." if good
+                   else "This sign-in link isn't for this session. Run /token-metrics:dashboard again.")
+            body = f"<!doctype html><meta charset=utf-8><title>token-metrics</title><p style='font:16px sans-serif'>{msg}".encode()
+            self.send_response(200 if good else 400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Callback)
+    srv.timeout = 1
+    link = f"{base_url(cfg)}/api/auth/google?" + urllib.parse.urlencode({"cli_port": srv.server_address[1], "cli_state": state})
+    print_consent()
+    opened = False
+    if not os.environ.get("CC_METRICS_NO_BROWSER"):
+        try:
+            opened = webbrowser.open(link)
+        except Exception:
+            opened = False
+    if not opened and not sys.stdout.isatty():
+        # inside a slash command nothing is shown until the command ends, so waiting for an unseen link is pointless
+        srv.server_close()
+        raise Fail(f"Couldn't open a browser here. Run `python3 {os.path.abspath(__file__)} dashboard` in a terminal, "
+                   f"or join with an email code: /token-metrics:dashboard you@{DOMAIN}")
+    print("Sign in with your work Google account in the browser tab that just opened." if opened
+          else f"Open this link to sign in with your work Google account:\n{link}")
+    print(f"Waiting up to {GOOGLE_WAIT_S} seconds...")
+    deadline = time.time() + GOOGLE_WAIT_S
+    try:
+        while "code" not in got and time.time() < deadline:
+            srv.handle_request()
+    finally:
+        srv.server_close()
+    if "code" not in got:
+        raise Fail(f"Google sign-in didn't finish in time. Run it again, or join with an email code: "
+                   f"/token-metrics:dashboard you@{DOMAIN}")
+    r = call(cfg, "POST", "/api/auth/google/exchange", {"code": got["code"]}, auth=False)
+    cfg.update(token=r["token"], handle=r.get("handle"), email=r.get("email"), display_name=r.get("display_name"),
+               consent_at=datetime.now().astimezone().isoformat(timespec="seconds"), last_sync=0)
+    save(cfg)
+    print(f"\nJoined as {r.get('display_name')} ({r.get('email')}). Sending your first sync...")
+    try:
+        sync(cfg, force=True)
+    except Fail as e:
+        print(f"The first sync failed ({e}); it will retry when a session ends, or run /token-metrics:share.")
 
 
 def cmd_verify(a, cfg):
@@ -249,22 +349,16 @@ def cmd_dashboard(a, cfg):
         verify(cfg, args[1], args[2:])
         cfg = load()
     elif not cfg.get("token"):
-        if sys.stdin.isatty():
-            join_interactively(cfg, args[0] if args else None)
+        if args and "@" in args[0]:   # the email-code fallback: prompts for the code in a terminal
+            if sys.stdin.isatty():
+                join_interactively(cfg, args[0])
+                cfg = load()
+            else:
+                start_join(cfg, args[0], None, '/token-metrics:dashboard verify <code> "Your Name"')
+                return
+        else:   # the default: sign in with Google in the browser
+            google_join(cfg)
             cfg = load()
-        elif args and "@" in args[0]:
-            start_join(cfg, args[0], None, '/token-metrics:dashboard verify <code> "Your Name"')
-            return
-        else:
-            # a first run from the slash command: no terminal to prompt in, so explain the steps
-            # and exit 0 (a non-zero exit shows up in Claude Code as "Shell command failed")
-            print("Welcome to token-metrics! You haven't joined the leaderboard yet. Two steps:\n")
-            print(f"  1. /token-metrics:dashboard <your work email>      e.g. /token-metrics:dashboard jane@{DOMAIN}")
-            print("     This emails you a 6-digit code.")
-            print('  2. /token-metrics:dashboard verify <code> <Your Name>')
-            print("     This joins, syncs your history and opens your dashboard.\n")
-            print("Nothing is shared until step 2.")
-            return
     else:
         try:
             print("Synced your latest stats." if sync(cfg, force=True) else "Another sync is running; showing the last one.")
@@ -370,7 +464,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("preview")
     p = sub.add_parser("join")
-    p.add_argument("email")
+    p.add_argument("email", nargs="?", help="join with an email code instead of Google sign-in")
     p.add_argument("--url", help="leaderboard URL (else CC_METRICS_SHARE_URL)")
     p = sub.add_parser("verify")
     p.add_argument("code")

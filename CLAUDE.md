@@ -52,6 +52,8 @@ Deploy production with `cd leaderboard && npm run deploy`. It typechecks, applie
 - `rate N [ok|partial|fail]` returns `decision: block`, so the prompt never reaches the model.
 - A `[category]` prefix tags the start of a new task.
 
+It also runs the **cold-cache guard** (`cold_guard()`). It reads the transcript tail for the last main-thread model call. If that call is older than the cache lifetime and re-caching the chat would cost at least `COLD_GUARD_MIN_USD`, it blocks that one prompt with the cost. A held prompt makes no model call, so re-sending matches the same cold period (keyed by session and last-call time in `guard.json`) and goes through. Slash commands and messages starting with `<` are never held. `metrics_hook.py guard on|off|status` (`/token-metrics:cold-guard`) or `CC_METRICS_COLD_GUARD=0` turns it off. Costs come from `statusline.recache_cost()`, the same function the status line uses.
+
 Prompt text is not stored unless `CC_METRICS_KEEP_PROMPTS=1`.
 
 **Script sync.** On SessionStart, the hook copies the scripts listed in `sync_report_scripts()` into `~/.claude/metrics/`. On other events it only copies them if they are missing. The slash commands in `commands/*.md` run the copies from that fixed path, and fall back to `find`-ing them under `~/.claude/plugins`. This means:

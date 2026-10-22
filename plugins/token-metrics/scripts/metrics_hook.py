@@ -10,6 +10,10 @@ Extra commands you can type at the Claude Code prompt (handled here, never sent 
   rate 4 fail       ...plus outcome: ok | partial | fail
 Tag a new task by starting its prompt with a category:
   [bugfix] the date parser drops time zones
+
+Cold-cache guard: the first prompt after the prompt cache expired in a big chat is held once, with
+what sending it costs; sending it again goes through. `metrics_hook.py guard on|off|status` switches it
+(also off with CC_METRICS_COLD_GUARD=0).
 """
 import json
 import os
@@ -17,10 +21,15 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 LOG_DIR = os.path.expanduser(os.environ.get("CC_METRICS_DIR", "~/.claude/metrics"))
 KEEP_PROMPTS = os.environ.get("CC_METRICS_KEEP_PROMPTS") == "1"   # off by default for privacy
 SYNC_EVERY_S = 60 * 60   # same throttle as share.py, checked here so most sessions spawn nothing
+GUARD_FILE = os.path.join(LOG_DIR, "guard.json")   # cold-cache guard: on/off, and the cold periods already held
+COLD_GUARD_MIN_USD = 0.50   # a re-cache cheaper than this is never held
+TAIL_BYTES = 512 * 1024     # transcript tail read to find the last model call
+TTL_S = {"5m": 300, "1h": 3600}
 
 RATE_RE = re.compile(r"^\s*rate\s+([1-5])(?:\s+(ok|partial|fail))?\s*$", re.I)
 TAG_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*)\]")
@@ -73,6 +82,13 @@ def main():
                        correction=bool(CORRECTION_RE.match(prompt)), prompt_chars=len(prompt))
             if KEEP_PROMPTS:
                 rec["prompt"] = prompt[:500]
+            try:
+                held = cold_guard(data, prompt)
+            except Exception:
+                held = None
+            if held:
+                rec.update(cold_hold=True, recache_tokens=held[0])
+                reply = held[1]
 
     elif ev in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
         tool_input = data.get("tool_input") or {}
@@ -101,6 +117,113 @@ def main():
         start_background_sync()
 
 
+def load_guard():
+    try:
+        with open(GUARD_FILE) as f:
+            g = json.load(f)
+        return g if isinstance(g, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_guard(g):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    tmp = GUARD_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(g, f)
+    os.replace(tmp, GUARD_FILE)
+
+
+def last_call(path):
+    """(time, context tokens, model, cache lifetime) of the transcript's last main-thread model call, or None.
+    The lifetime comes from the latest call that wrote to the cache; without that split it is 1h."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - TAIL_BYTES))
+        lines = f.read().splitlines()
+    found, ttl = None, None
+    for raw in reversed(lines):
+        if b'"assistant"' not in raw or b'"usage"' not in raw:
+            continue
+        try:
+            e = json.loads(raw)
+        except ValueError:   # the first line of the tail may be cut
+            continue
+        msg = e.get("message") or {}
+        u = msg.get("usage")
+        if e.get("type") != "assistant" or e.get("isSidechain") or not u or msg.get("model") == "<synthetic>":
+            continue
+        if found is None:
+            t = datetime.fromisoformat(e["timestamp"].replace("Z", "+00:00")).timestamp()
+            ctx = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            found = (t, ctx, msg.get("model", ""))
+        split = u.get("cache_creation") or {}
+        if split.get("ephemeral_1h_input_tokens"):
+            ttl = "1h"
+        elif split.get("ephemeral_5m_input_tokens"):
+            ttl = "5m"
+        if ttl:
+            break
+    return found and found + (ttl or "1h",)
+
+
+def cold_guard(data, prompt):
+    """Hold the first prompt after the prompt cache expired in a big chat, once, to show what sending it costs.
+    Returns (tokens to re-cache, block reply) or None. Sending it again goes through: a held prompt makes
+    no model call, so the same cold period is recognised by the time of the last call."""
+    text = prompt.lstrip()
+    if text.startswith("/") or (text.startswith("<") and not text.startswith("<pasted_content")):
+        return None   # slash commands, and task notifications and other messages Claude Code sends itself
+    if data.get("agent_id") or os.environ.get("CC_METRICS_COLD_GUARD") == "0":
+        return None
+    g = load_guard()
+    if g.get("cold_guard") is False:
+        return None
+    call = last_call(data.get("transcript_path") or "")
+    if not call:
+        return None
+    t, tokens, model, ttl = call
+    idle = time.time() - t
+    if idle < TTL_S[ttl]:
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import statusline
+    cost = statusline.recache_cost(tokens, model, ttl)
+    if not cost or cost[0] < COLD_GUARD_MIN_USD:
+        return None
+    key = f"{data.get('session_id')}:{t}"
+    held = g.get("held") or []
+    if key in held:
+        return None
+    g["held"] = (held + [key])[-50:]
+    save_guard(g)
+    h, m = divmod(int(idle // 60), 60)
+    since = f"{h // 24}d {h % 24}h" if h >= 24 else f"{h}h {m}m" if h else f"{m} min"
+    reason = (f"⏸ Held once: no reply for {since}, so the prompt cache ({ttl}) has expired.\n"
+              f"Sending this re-writes ~{statusline.k(tokens)} tokens to the cache: ≈ {statusline.usd(cost[0])} at API prices "
+              f"(≈ {statusline.usd(cost[1])} if it were still warm).\n"
+              "  • Unrelated task?  /clear and start fresh, much cheaper.\n"
+              "  • Same task?       Send it again; it goes through this time.\n"
+              "Turn this check off: /token-metrics:cold-guard off")
+    return tokens, {"decision": "block", "reason": reason}
+
+
+def guard_command(args):
+    """`metrics_hook.py guard on|off|status`, run by /token-metrics:cold-guard."""
+    g = load_guard()
+    if args and args[0] in ("on", "off"):
+        g["cold_guard"] = args[0] == "on"
+        save_guard(g)
+    if os.environ.get("CC_METRICS_COLD_GUARD") == "0":
+        print("Cold-cache guard is off (CC_METRICS_COLD_GUARD=0 is set in your environment).")
+    elif g.get("cold_guard") is False:
+        print("Cold-cache guard is off. `/token-metrics:cold-guard on` turns it back on.")
+    else:
+        print("Cold-cache guard is on: after a break long enough for the prompt cache to expire, the first message "
+              f"in a chat that would cost ${COLD_GUARD_MIN_USD:.2f}+ to re-cache is held once, with the cost. "
+              "Sending it again goes through. `/token-metrics:cold-guard off` turns it off.")
+
+
 def start_background_sync():
     """If the user joined the leaderboard and the last sync is over an hour old, run share.py sync
     detached, so this hook returns immediately. share.py rechecks the throttle and holds a lock."""
@@ -119,6 +242,9 @@ def start_background_sync():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["guard"]:
+        guard_command(sys.argv[2:])
+        sys.exit(0)
     try:
         main()
     except Exception:

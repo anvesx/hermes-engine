@@ -14,6 +14,7 @@ Prices come from leak_report.py. The hook keeps this script and leak_report.py u
 Run with no arguments, it is the status line itself: it reads Claude Code's status line JSON on stdin
 and prints one right-aligned line from `prompt_cache` (Claude Code 2.1.251+; miss cause 2.1.260+):
   warm   cache ● 1h ████░░ 37m left · hit 91% · chat 152k · re-read $0.03 · if cold $1.22
+  ending cache ● 1h █░░░░░ 9m left · ... · break soon? finish this task first · new task after? /clear
   cold   cache ○ cold · chat 152k · next msg re-caches ≈ $1.22 · new task? /clear
 Costs are API list prices. On a subscription they show the relative weight against usage limits.
 It must never break the status line: any error prints nothing.
@@ -38,7 +39,8 @@ BAR = 6
 MARGIN = 6                # room for Claude Code's own padding, so the line never wraps
 BIG_CHAT = 300_000        # chat size where every message gets expensive: suggest /compact at a break
 CHAT_COLORS = ((600_000, RED), (500_000, YELLOW), (300_000, WHITE))   # below 300k: dim
-HIT_LOW = 0.80            # session hit rate shown in yellow below this (our choice; Claude Code defines none)
+ENDING = 0.2              # share of the cache lifetime left when the countdown turns yellow and suggests wrapping up
+HIT_LOW = 0.80           # session hit rate shown in yellow below this (our choice; Claude Code defines none)
 WRITE_MULT = {"5m": 1.25, "1h": 2.0}   # cache-write price / input price, as in leak_report.WRITE_MULT
 WRAP_TIMEOUT_S = 5
 
@@ -51,6 +53,14 @@ def prices(model):
         return leak_report.price(model)
     except Exception:
         return None
+
+
+def recache_cost(tokens, model, ttl):
+    """(cold, warm) $ for a chat of `tokens`: re-written to the cache, or read from it. None if unpriced."""
+    p = prices(model)
+    if not tokens or not p:
+        return None
+    return tokens * p[0] * WRITE_MULT.get(ttl, 2.0) / 1e6, tokens * p[2] / 1e6
 
 
 def usd(x):
@@ -95,11 +105,7 @@ def cache_line(data):
 
     ttl = pc.get("ttl")
     n = pc.get("recache_tokens_if_cold") or (data.get("context_window") or {}).get("total_input_tokens")
-    p = prices((data.get("model") or {}).get("id"))
-    cold_cost = warm_cost = None
-    if n and p:
-        cold_cost = n * p[0] * WRITE_MULT.get(ttl, 2.0) / 1e6   # history re-written to the cache
-        warm_cost = n * p[2] / 1e6                              # same history read from the cache
+    cold_cost, warm_cost = recache_cost(n, (data.get("model") or {}).get("id"), ttl) or (None, None)
     ttl_s = {"5m": 300, "1h": 3600}.get(ttl)
     exp = pc.get("expires_at")
     left = (exp - time.time()) if exp else None
@@ -113,7 +119,8 @@ def cache_line(data):
         if ttl_s:
             filled = round(max(0.0, min(1.0, left / ttl_s)) * BAR)
             head += " " + "█" * filled + "░" * (BAR - filled)
-        segs = [(head + " " + left_text(left), YELLOW if ttl_s and left / ttl_s < 0.2 else GREEN)]
+        ending = bool(ttl_s and left / ttl_s < ENDING)
+        segs = [(head + " " + left_text(left), YELLOW if ending else GREEN)]
         if hit:
             segs.append(hit)
         if pc.get("misses"):
@@ -122,7 +129,9 @@ def cache_line(data):
             segs.append(chat)
         if cold_cost is not None:
             segs.append((f"re-read {usd(warm_cost)} · if cold {usd(cold_cost)}", DIM))
-        if big:
+        if ending:
+            segs.append(("break soon? finish this task first · new task after? /clear", YELLOW))
+        elif big:
             segs.append(("/compact at next break", YELLOW))
         return line(*segs)
 

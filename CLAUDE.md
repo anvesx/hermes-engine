@@ -52,7 +52,18 @@ Deploy production with `cd leaderboard && npm run deploy`. It typechecks, applie
 - `rate N [ok|partial|fail]` returns `decision: block`, so the prompt never reaches the model.
 - A `[category]` prefix tags the start of a new task.
 
-It also runs the **cold-cache guard** (`cold_guard()`). It reads the transcript tail for the last main-thread model call. If that call is older than the cache lifetime and re-caching the chat would cost at least `COLD_GUARD_MIN_USD`, it blocks that one prompt with the cost. A held prompt makes no model call, so re-sending matches the same cold period (keyed by session and last-call time in `guard.json`) and goes through. Slash commands and messages starting with `<` are never held. `metrics_hook.py guard on|off|status` (`/token-metrics:cold-guard`) or `CC_METRICS_COLD_GUARD=0` turns it off. Costs come from `statusline.recache_cost()`, the same function the status line uses.
+It also runs the **guards** in `guards.py` (imported as a sibling), which stop leaks as they happen. `prompt_guards()` runs on UserPromptSubmit and `tool_guards()` on PreToolUse. Each guard holds an action **once**, with the cost and what to do instead, and repeating it goes through. Held keys live in `guard.json`, so nobody gets stuck. The hook logs `guard` on the event when one fires.
+- Prompt guards read the transcript tail for the last main-thread model call (`last_call()`):
+  - `cold` (leak 4) blocks the first prompt after the cache lifetime when re-caching would cost at least `COLD_MIN_USD`. A held prompt makes no model call, so re-sending matches the same cold period (keyed by session and last-call time) and goes through.
+  - `new-task` (8) blocks a `[tag]`ged prompt when the chat carries `CARRY_MIN`+ tokens beyond its first call's context (`first_ctx()`).
+  - `size` (6/11/17) only returns a `systemMessage`, once per session per `SIZE_NOTICES` line.
+  - Slash commands and messages starting with `<` are never held.
+- Tool guards return `permissionDecision: deny` with a reason Claude acts on:
+  - `big-read` (24): a whole-file `Read` over `BIG_READ`; `os.stat` only, no transcript read.
+  - `fork` (13): `subagent_type: fork` with the main chat over `FORK_MIN`.
+- Switching: `metrics_hook.py guards [name] [on|off]` (`/token-metrics:guards`) stores names in `off`; `CC_METRICS_GUARDS=0` turns all of them off. The older `metrics_hook.py guard on|off|status` (`/token-metrics:cold-guard`), `CC_METRICS_COLD_GUARD=0` and the `cold_guard: false` key still switch `cold`.
+- Costs come from `statusline.recache_cost()`/`prices()`, the same functions the status line uses.
+- Thresholds mirror `leak_report.py` constants (`CARRY_MIN`, `FORK_MIN`). `BIG_READ` is set above `BIG_RESULT` because a held Read costs one extra model call.
 
 Prompt text is not stored unless `CC_METRICS_KEEP_PROMPTS=1`.
 
@@ -102,7 +113,7 @@ Detectors call `add_finding(...)` / `add(...)`:
 
 - Some definitions are copied, not shared, because each script must run alone:
   - `PRICES` (and the cache-write multipliers) appear in both `leak_report.py` and `analyze.py`. Add new model versions to both. `statusline.py` imports them from `leak_report.py` but keeps its own copy of the two cache-write multipliers.
-  - `CORRECTION_RE` and `TAG_RE` appear in both `metrics_hook.py` and `leak_report.py`.
+  - `CORRECTION_RE` and `TAG_RE` appear in both `metrics_hook.py` and `leak_report.py`; `TAG_RE` also in `guards.py`.
   - `SYNC_EVERY_S` appears in both `metrics_hook.py` and `share.py`.
   - The payload schema is built by `stats.py` and validated by `leaderboard/lib/validate.ts`. Bump `SCHEMA` in both for breaking changes.
   - `leaderboard/lib/categories.json` is generated from `leak_categories.py`. Run `npm run categories` after changing categories.

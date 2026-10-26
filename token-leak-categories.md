@@ -267,6 +267,22 @@ Besides messages and tool results, newer Claude Code transcripts record `attachm
 
 ---
 
+## Guards (stopped as they happen)
+
+The report measures leaks after the fact. `plugins/token-metrics/scripts/guards.py`, run by the hook, stops the ones a hook can see coming. Each guard holds the action **once** and says what it costs; repeating the same action goes through. `/token-metrics:guards` shows and switches them.
+
+| Guard | Category | Fires on | What it asks for |
+|---|---|---|---|
+| `cold` | 4 Cache expired after a break | First prompt after the cache lifetime, re-cache ≥ $0.50 | `/clear`, or send again |
+| `new-task` | 8 Sessions that never end | `[tag]`ged prompt in a chat carrying 20k+ tokens beyond its starting context | `/clear`, or send again |
+| `size` | 6, 11, 17 (long conversations) | Chat passes 150k, then 300k (notice only, never held) | `/compact` or `/clear` |
+| `big-read` | 24 Too much tool output | `Read` without offset/limit of a file over ~8k tokens (2k in dependency folders, lockfiles, minified files) | Grep, or Read with offset/limit |
+| `fork` | 13 Fork context duplication | `Agent` with `subagent_type: fork` while the main chat is over 50k | A fresh agent with a short brief |
+
+Not guarded yet: 20 Visual iteration loops (a text alternative to screenshots is planned). 1 Heavy starting context is fixed before the first prompt (see 48 for the fix), 12 Bigger model than needed was judged not worth holding agents for, and 2, 3, 5, 7, 9, 10 and 26 are either not waste or too vague to block on (see `plugins/token-metrics/scripts/category-measurement-issues.md`).
+
+---
+
 ## Open questions
 
 - **12 Bigger model than needed**: no good measure yet of the real problem (people on higher plans never switch to a cheaper model). The report now shows the share of main-session spend on Opus/Fable as a first signal.

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+token-metrics - run the token-metrics plugin from a terminal. Put on your PATH by install.sh.
+
+It runs the newest installed copy of the plugin (~/.claude/plugins/cache/hermes-engine/token-metrics/<version>),
+the same scripts the /token-metrics:* slash commands run inside Claude Code.
+"""
+import glob
+import os
+import subprocess
+import sys
+
+INSTALL_URL = "https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh"
+CACHE = os.path.join(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")), "plugins/cache/hermes-engine/token-metrics")
+SYNCED = os.path.expanduser(os.environ.get("CC_METRICS_DIR", "~/.claude/metrics"))
+
+USAGE = """token-metrics - Claude Code token metrics from the terminal
+
+  token-metrics report [options]     token-leak report, last 30 days (options: --days N, --since YYYY-MM-DD,
+                                     --all, --units tokens, --md FILE; see `token-metrics report --help`)
+  token-metrics tasks                tokens, latency, frustration and success by task category
+  token-metrics wrapped              your usage in numbers (local only)
+  token-metrics join [email]         join the company leaderboard (no email: sign in with Google)
+  token-metrics verify CODE          finish joining with the emailed code
+  token-metrics share                sync now and show your points, rank, badges and card link
+  token-metrics dashboard            open your personal dashboard in the browser
+  token-metrics leaderboard [week|month|all]
+  token-metrics export [preview]     anonymous export for the token-leak study
+  token-metrics statusline [keep|replace|off]
+  token-metrics update               install the latest version (plugin and this command)
+  token-metrics version              installed version and where it lives
+
+Inside Claude Code the same things are /token-metrics:leak-report, /token-metrics:wrapped, and so on."""
+
+
+def version_key(path):
+    parts = os.path.basename(path).split(".")
+    return [int(p) if p.isdigit() else -1 for p in parts]
+
+
+def plugin_dir():
+    """The newest installed copy of the plugin, or None."""
+    dirs = [d for d in glob.glob(os.path.join(CACHE, "*")) if os.path.isdir(os.path.join(d, "scripts"))]
+    return max(dirs, key=version_key) if dirs else None
+
+
+def script(name):
+    d = plugin_dir()
+    for path in ([os.path.join(d, "scripts", name)] if d else []) + [os.path.join(SYNCED, name)]:
+        if os.path.exists(path):
+            return path
+    sys.exit("token-metrics is not installed. Install it with:\n  curl -fsSL " + INSTALL_URL + " | bash")
+
+
+def run(name, *args):
+    return subprocess.call([sys.executable, script(name), *args])
+
+
+def update():
+    return subprocess.call(["/bin/bash", "-c", f"curl -fsSL {INSTALL_URL} | bash"])
+
+
+def main(argv):
+    cmd, args = (argv[0], argv[1:]) if argv else ("help", [])
+    if cmd in ("report", "leaks", "leak-report"):
+        window = [] if any(a.startswith(("--days", "--since")) for a in args) else ["--days", "30"]
+        return run("leak_report.py", *window, *args)
+    if cmd in ("tasks", "task-report"):
+        return run("analyze.py", *args)
+    if cmd == "wrapped":
+        return run("stats.py", *args)
+    if cmd == "join":
+        return run("share.py", "join", *args)
+    if cmd == "verify":
+        return run("share.py", "verify", *args)
+    if cmd == "share":
+        if args:
+            return run("share.py", *args)
+        return run("share.py", "sync", "--force") or run("share.py", "me")
+    if cmd in ("dashboard", "sync", "me", "leave"):
+        return run("share.py", cmd, *args)
+    if cmd == "leaderboard":
+        return run("share.py", "leaderboard", "--period", args[0] if args else "week")
+    if cmd in ("export", "research-export"):
+        return run("research.py", "preview" if args[:1] == ["preview"] else "export", *args[1:])
+    if cmd == "statusline":
+        if args[:1] == ["off"]:
+            return run("statusline.py", "off")
+        return run("statusline.py", "install", *args[:1])
+    if cmd == "update":
+        return update()
+    if cmd in ("version", "--version", "-v"):
+        d = plugin_dir()
+        print(f"token-metrics {os.path.basename(d)} ({d})" if d else "token-metrics: plugin not installed")
+        return 0
+    print(USAGE)
+    return 0 if cmd in ("help", "--help", "-h") else 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

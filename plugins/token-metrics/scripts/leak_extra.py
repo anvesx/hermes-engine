@@ -19,11 +19,12 @@ import os
 import re
 from collections import defaultdict
 
-HISTORY_LIMIT = 100_000        # conversation history per call considered reasonable
+import leak_config
+
+CFG = leak_config.CONFIG
 STALE_CALLS = 30               # a tool result still carried this many calls later counts as stale
 PASTE_MIN = 400                # pasted paragraph size (chars) worth tracking for repeats
 TRANSCRIPT_MIN = 2_000         # prompt size before a pasted chat transcript counts
-RESTART_GAP = 60 * 60          # a session starting this soon after the previous one is a restart
 UNCACHED_MIN = 10_000          # uncached input on one call before it counts as missing caching
 CONCURRENT_S = 10              # helper agents starting this close together race the cache
 PLAN_LIMIT = 5                 # plan/todo updates per task considered reasonable
@@ -200,7 +201,7 @@ ADDITIONAL = {
     140: ("Background session-analysis model calls", "Retries, automation, and context rebuilding", HIDDEN),
 }
 SAME_AS = {121: 23, 122: 24, 127: 25}   # canvas row -> core leak id that already measures it
-REVIEW = {1, 6, 17, 22, 37, 54, 69, 109, 115, 125, 131}   # spend to review, not all waste
+REVIEW = {6, 17, 22, 37, 54, 69, 109, 115, 125, 131}   # spend to review, not all waste
 # measured inside leak_report.py's core detectors: 25, 26, 27, 29, 30, 38 and 40 (#3), 72 and 76 (#7), 135 (#16)
 
 
@@ -254,12 +255,37 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
     def texts(c):
         return [b.get("text", "") for b in c["blocks"] if b.get("type") == "text"]
 
-    # A1 Long single-thread history replay: history beyond the limit, on every call
-    over = [(c, c["ctx"] - first_ctx - HISTORY_LIMIT) for c in calls]
-    over = [(c, x) for c, x in over if x > 0]
-    if over:
-        add(lid(1), sum(x * c["read_price"] for c, x in over),
-            f"{len(over)} calls carried more than {HISTORY_LIMIT:,} tokens of history")
+    # A1 Long single-thread history replay (curated #6): a long-running session whose average context is a large
+    # share of the model's window. Charged: the history above what a lean session carries, on every call. The detail
+    # says what the context was made of at its peak, so "compact now" comes with a reason; stale tool results and
+    # screenshots (A5, #14) can't be removed one by one, only by /compact or /clear.
+    s.long_context, s.long_parts = False, None
+    peak = max(calls, key=lambda c: c["ctx"])
+    # the window: configured, else where Claude Code auto-compacted, else 1M once past 200k or on a current model
+    auto_at = [n for t, n in s.compact_pre.items() if n and s.compact_trigger.get(t) == "auto"]
+    window = CFG["context_window"] or (max(auto_at) if auto_at else
+                                       1_000_000 if peak["ctx"] > 200_000 or not old_model(peak["model"]) else 200_000)
+    avg = sum(c["ctx"] for c in calls) / len(calls)
+    if len(calls) >= CFG["long_session_min_calls"] and avg > CFG["long_context_share"] * window:
+        s.long_context = True
+        k = bisect.bisect_right(s.comp_sorted, peak["t"]) - 1
+        since = s.comp_sorted[k] if k >= 0 else 0
+        rs = [r for r in results if since < r["t"] < peak["t"]]
+        parts = {"tool results": sum(r["tokens"] for r in rs), "screenshots": sum(r["image_tokens"] for r in rs),
+                 "replies": sum(s.tok(sum(map(len, texts(c)))) for c in calls if since < c["t"] < peak["t"]),
+                 "tool inputs": sum(s.tok(len(json.dumps(u["input"]))) for u in s.tool_uses.values() if since < u["t"] < peak["t"]),
+                 "prompts": sum(p["tokens"] for p in s.prompts if since < p["t"] < peak["t"])}
+        parts["starting context"] = min(first_ctx, peak["ctx"]) if not since else 0
+        known = sum(parts.values())
+        if known > peak["ctx"]:   # item sizes are estimates; never more than the measured context
+            parts = {n: int(x * peak["ctx"] / known) for n, x in parts.items()}
+        parts["other (summaries, injected context)"] = max(0, peak["ctx"] - sum(parts.values()))
+        s.long_parts = parts
+        mix = ", ".join(f"{n} {x / peak['ctx']:.0%}" for n, x in sorted(parts.items(), key=lambda kv: -kv[1])[:3] if x)
+        auto = sum(1 for t in s.comp_sorted if s.compact_trigger.get(t) != "manual")
+        add(lid(1), sum(max(0, c["ctx"] - first_ctx - CFG["history_keep"]) * c["read_price"] for c in calls),
+            f"average context ~{int(avg):,} ({avg / window:.0%} of {window // 1000}k) over {len(calls)} calls; "
+            f"at its peak: {mix}" + (f"; {auto} automatic compactions" if auto else ""))
 
     # A5 Old tool results carried into later turns: replay after STALE_CALLS more calls
     stale, n = 0.0, 0
@@ -517,6 +543,8 @@ def analyse(s, tasks, add, price, cache_cost=lambda tokens, usd: usd):
                 and not LINT_CMD.search(cmd) and not STATUS_CMD.search(cmd)):   # A136
             key = (name, md5(json.dumps(inp, sort_keys=True)), r["hash"])
             polls[key] += 1
+            if name == "Bash" and polls[key] == 2:                    # 17a (curated #25): rerun, same output
+                radd(27, s.carry(r["t"], tokens), f"reran `{cmd[:40]}` with unchanged output (~{tokens:,} tokens)")
             if polls[key] >= POLL_MIN:
                 radd(lid(136), tool_share(call) + s.carry(r["t"], tokens), f"{name} returned the same result {polls[key]} times")
         prev = r
@@ -632,6 +660,12 @@ def injected(s, add):
             add(lid(68), s.carry(b["t"], b["tokens"] - SKILL_KEEP), f"invoked {name}: ~{b['tokens']:,}-token skill body")
 
 
+def old_model(model):
+    """Models with a 200k context window."""
+    m = (model or "").lower()
+    return any(k in m for k in ("claude-3", "claude-haiku", "sonnet-4-5", "sonnet-4-1", "sonnet-4-2", "opus-4-1", "opus-4-5"))
+
+
 def min_cacheable(model):
     """Minimum cacheable prompt length; verify against the prompt-caching docs for new models."""
     return 1_024 if "sonnet" in (model or "").lower() else 4_096
@@ -645,6 +679,8 @@ def cross_session(sessions, add_finding):
     for s in sessions:
         by_project[s.project].append(s)
     owner = {}
+    by_sid = {s.sid: s for s in sessions}
+    window = CFG["restart_window_h"] * 3600
     for ss in by_project.values():
         ss.sort(key=lambda s: s.calls[0]["t"])
         pasted, prev, requests = set(), None, defaultdict(list)
@@ -671,7 +707,22 @@ def cross_session(sessions, add_finding):
                             f"forked from session {min(shared)[:8]}, inheriting ~{inherited:,} tokens")
             for u in s.uuids:
                 owner.setdefault(u, s.sid)
-            if prev and not s.cut and s.calls[0]["t"] - prev.calls[-1]["t"] < RESTART_GAP and s.first_edit < float("inf"):
-                cost = sum(c["cost"] for c in s.calls if c["t"] < s.first_edit)
-                add_finding(lid(10), s, cost, f"restarted {(s.calls[0]['t'] - prev.calls[-1]['t']) / 60:.0f} min after the last session; rebuilt context before the first edit")
+            # A10 (curated #10) Rebuilding context after a fresh start: a session that could have continued a recent
+            # one - the prompt check's match, else the project's previous session if it ended within the window - and
+            # re-read that session's files before its first edit. A prior session already too long to continue (A1)
+            # doesn't count. Charged: the calls before the first edit, in proportion to the re-read tokens.
+            if not s.cut and s.first_edit < float("inf"):
+                t0 = s.calls[0]["t"]
+                if s.first_match is not None:
+                    prior = by_sid.get(s.first_match.get("continues"))
+                else:
+                    prior = prev if prev and t0 - prev.calls[-1]["t"] < window else None
+                if prior is not None and prior is not s and prior.calls[0]["t"] < t0 and not prior.long_context:
+                    reread = [n for p, n, _ in s.explore if p in prior.read_paths]
+                    explored = sum(n for _, n, _ in s.explore)
+                    if reread and explored:
+                        pre = sum(c["cost"] for c in s.calls if c["t"] < s.first_edit)
+                        add_finding(lid(10), s, pre * sum(reread) / explored,
+                                    f"started {(t0 - prior.calls[-1]['t']) / 60:.0f} min after session {prior.sid[:8]} and "
+                                    f"re-read {len(reread)} of its files before the first edit")
             prev = s

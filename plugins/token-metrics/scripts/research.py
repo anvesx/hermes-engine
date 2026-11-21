@@ -28,8 +28,8 @@ from datetime import datetime
 import leak_categories
 import leak_report
 
-FORMAT = 1
-CLIENT = "token-metrics/1.7.0"
+FORMAT = 2   # 2: categories reworked per the category audit (1.8.0); not comparable with format 1
+CLIENT = "token-metrics/1.8.0"
 CTX_BUCKETS = ((0, 100_000), (100_000, 250_000), (250_000, 500_000), (500_000, float("inf")))
 GAP_BUCKETS_MIN = ((5, 60), (60, 180), (180, 720), (720, float("inf")))   # idle gap before a full cache rewrite
 TOKEN_TYPES = (("input", "in"), ("cache_write", "cw"), ("cache_read", "cr"), ("output", "out"))
@@ -42,12 +42,7 @@ def bucket_label(lo, hi, unit=""):
 
 def collect(root, events):
     hook_prompts, _ = leak_report.load_hook_prompts(events)
-    findings = defaultdict(list)
-    for sid, entries in leak_report.load_sessions(root, 0).items():
-        leak_report.analyse(leak_report.Session(sid, entries, 2.0, 3600, hook_prompts), findings)
-    if findings["_sessions"]:
-        leak_report.cross_session(findings)
-    return findings
+    return leak_report.analyse_all(root, 0, 2.0, 3600, hook_prompts)
 
 
 def export(root, events):

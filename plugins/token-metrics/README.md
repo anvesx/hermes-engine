@@ -1,23 +1,35 @@
 # token-metrics plugin
 
 Measures every Claude Code task (tokens, cost, latency, frustration, outcome) by category, and ranks
-token leaks by estimated cost in 50 categories built from the team's Leak Categories canvas
+token leaks by estimated cost in 43 categories built from the team's Leak Categories canvas
 (see `token-leak-categories.md` at the repo root). Your settings.json hooks are not modified: plugin hooks run
 alongside your own. Data stays in `~/.claude/metrics/` unless you join the company leaderboard (below).
 
 ## Install
 
-Inside Claude Code:
+In a terminal (macOS):
 
-```
-/plugin marketplace add anvesx/hermes-engine
-/plugin install token-metrics@hermes-engine
-/reload-plugins
+```bash
+curl -fsSL https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh | bash
 ```
 
-The same from a terminal: `claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine`,
-then start `claude` as usual. To join the company leaderboard, run this and sign in with your work Google account in
-the browser tab it opens:
+Then restart Claude Code, or run `/reload-plugins` in an open session. The script (`install.sh` at the repo root):
+
+- adds this repo as the plugin marketplace `hermes-engine`, replacing a zip or folder copy of that name
+- installs or updates `token-metrics@hermes-engine`, and uninstalls `token-metrics` copies installed from other
+  (older zip) marketplaces, so only one copy of the hook records events; your data in `~/.claude/metrics` is kept
+- refreshes the report scripts in `~/.claude/metrics`
+- installs a `token-metrics` command into `~/.local/bin`, adding that folder to `PATH` in `~/.zshrc` if needed
+
+To update, run the same command again or `token-metrics update`. It needs Claude Code (`claude`) and Python 3.8+.
+
+The same without the script, inside Claude Code: `/plugin marketplace add anvesx/hermes-engine`,
+`/plugin install token-metrics@hermes-engine`, `/reload-plugins`; update with `/plugin marketplace update hermes-engine`
+and `/plugin update token-metrics@hermes-engine`.
+To try it for one session without installing: `claude --plugin-dir /path/to/hermes-engine/plugins/token-metrics`
+(the hooks, including the leaderboard sync on exit, only run in sessions started that way).
+
+To join the company leaderboard, run this and sign in with your work Google account in the browser tab it opens:
 
 ```
 /token-metrics:dashboard
@@ -26,21 +38,22 @@ the browser tab it opens:
 No browser? Join with an email code instead: `/token-metrics:dashboard you@devxlabs.ai`, then
 `/token-metrics:dashboard verify <code> Your Name`.
 
-To update: `/plugin marketplace update hermes-engine`, then `/plugin update token-metrics@hermes-engine` and `/reload-plugins`.
+### From a terminal
 
-From a zip instead (it unpacks to a `plugins` folder, which is also a local marketplace named `hermes-engine`):
+Every slash command has a terminal equivalent that runs the same scripts and uses no tokens:
 
-```bash
-cd ~/Downloads && unzip token-metrics.zip
-claude plugin marketplace add ~/Downloads/plugins
-claude plugin install token-metrics@hermes-engine
-```
-
-Installing copies the plugin into Claude Code's plugin cache, so the unzipped folder can be deleted afterwards. To update
-from a newer zip, unzip it over the old folder and run
-`claude plugin marketplace update hermes-engine && claude plugin update token-metrics@hermes-engine`.
-To try it for one session without installing: `claude --plugin-dir ~/Downloads/plugins/token-metrics`
-(the hooks, including the hourly leaderboard sync, only run in sessions started that way).
+| Terminal | In Claude Code |
+|---|---|
+| `token-metrics report [--days N] [--all] [--units tokens]` | `/token-metrics:leak-report` |
+| `token-metrics tasks` | `/token-metrics:task-report` |
+| `token-metrics wrapped` | `/token-metrics:wrapped` |
+| `token-metrics join [email]`, `token-metrics verify CODE` | `/token-metrics:join` |
+| `token-metrics share` | `/token-metrics:share` |
+| `token-metrics dashboard` | `/token-metrics:dashboard` |
+| `token-metrics leaderboard [week\|month\|all]` | `/token-metrics:leaderboard` |
+| `token-metrics export [preview]` | `/token-metrics:research-export` |
+| `token-metrics statusline [keep\|replace\|off]` | `/token-metrics:statusline` |
+| `token-metrics update`, `token-metrics version` | |
 
 ## Use
 
@@ -48,7 +61,7 @@ To try it for one session without installing: `claude --plugin-dir ~/Downloads/p
 |---|---|
 | `[bugfix] the parser drops time zones` | Starts a task in category `bugfix` (the prompt goes to Claude as normal) |
 | `rate 3 ok` | Frustration 1-5 and outcome ok / partial / fail for the task just done. Blocked by the hook, so it costs no tokens |
-| `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display) |
+| `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display). Leaks come first, then a separate "Spend to review" table for normal spend that is sometimes avoidable (not counted as waste) |
 | `/token-metrics:task-report` | Metrics by category |
 | `/token-metrics:wrapped` | Your usage in numbers: tokens, API-equivalent spend, active hours, streaks, biggest leaks (local only) |
 | `/token-metrics:research-export` | Writes an anonymous aggregate file for the team's token-leak study (totals, shares and session sizes; no prompts, code, paths, project names or ids). `preview` prints it instead. Nothing is sent: you send the file yourself |
@@ -70,6 +83,11 @@ Add `--units tokens` to count every token as 1 instead of pricing it; cache cate
 that missed the cache, written to it or sent uncached (cache events), since a cache miss sends no extra tokens.
 Item sizes are estimated with a characters-per-token ratio each session measures from its own tool results
 (or a per-tokenizer default); the report states the ratio it used.
+
+Five categories (sessions that never end, restarting too often, correction churn, repeated tasks, bigger model than needed) depend on what a
+prompt means, so the report asks a model to label your prompts (see Privacy). Thresholds such as the starting-context
+limit (60k tokens) can be changed in `~/.claude/metrics/config.json`, for example `{"start_context_threshold": 80000}`;
+the keys and defaults are listed in `token-leak-categories.md`. Unknown keys are ignored.
 
 Newer Claude Code versions record the loaded tool definitions, skill listings and CLAUDE.md files in the
 transcript, so the report can show which MCP servers and skills you load but never use. Sessions from older
@@ -102,7 +120,7 @@ all-time usage, 12-week charts of tokens, hours, spend, points and waste index a
 leaks next to the company's, model mix, badges with progress, and the leaderboard. Anyone else who opens the same
 link sees only your public card. Set `CC_METRICS_NO_BROWSER=1` to print the link instead of opening it.
 
-After you join, each session end also syncs your stats in the background, at most once an hour. Points come from
+After you join, exiting Claude Code (`/exit`, Ctrl+D or closing the terminal) syncs your stats in the background; `/clear` and `/resume` sync at most once an hour. Points come from
 participation (an active synced week, hooks on 80%+ of sessions, tagging tasks, rating tasks) and from leaking
 less than your own baseline. Tokens, spend and hours are shown and earn badges, but never points. Post your public
 card link and the card image previews on LinkedIn and X.
@@ -122,6 +140,14 @@ Other commands, not needed for normal use:
 
 Prompt text is not stored, only length, category and whether it looked like a correction.
 Set `CC_METRICS_KEEP_PROMPTS=1` to keep the first 500 characters.
+
+The leak report labels your prompts with a model (the prompt check): it runs `claude -p` with Sonnet through your own
+Claude Code login, so prompt text (the first 500 characters of each typed prompt, short excerpts of earlier sessions
+of the same project, and the start of each Opus/Sonnet turn's final reply) goes to the model, as it does when you use Claude Code. Labels are cached in
+`~/.claude/metrics/prompt_checks.json` by hash, without prompt text, and at most 60 new calls are made per run. It is
+on by default. Turn it off with `"prompt_check": false` in `~/.claude/metrics/config.json` or by setting
+`CC_METRICS_PROMPT_CHECK=0`; the report then falls back to keyword and file-overlap checks. The prompt check never sends
+anything to the leaderboard.
 
 Nothing is sent anywhere until you join (`/token-metrics:dashboard` or `/token-metrics:join`). After that, syncing sends only per-week aggregates:
 tokens (split into input, cache write, cache read and output, by model family and main session vs subagents), daily

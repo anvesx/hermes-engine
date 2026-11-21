@@ -4,16 +4,6 @@
   "group": "Starting context and setup",
   "review": false
  },
- "2": {
-  "name": "Cache-write premium",
-  "group": "Prompt cache",
-  "review": true
- },
- "3": {
-  "name": "Cold cache at session and agent start",
-  "group": "Prompt cache",
-  "review": true
- },
  "4": {
   "name": "Cache expired after a break",
   "group": "Prompt cache",
@@ -22,12 +12,12 @@
  "5": {
   "name": "Many agents",
   "group": "Agents",
-  "review": true
+  "review": false
  },
  "6": {
   "name": "Long history replay",
   "group": "Conversation history",
-  "review": true
+  "review": false
  },
  "7": {
   "name": "Interrupted turns",
@@ -49,11 +39,6 @@
   "group": "Conversation history",
   "review": false
  },
- "11": {
-  "name": "Stale tool results carried forward",
-  "group": "Conversation history",
-  "review": false
- },
  "12": {
   "name": "Bigger model than needed",
   "group": "Model and output",
@@ -63,16 +48,6 @@
   "name": "Fork context duplication",
   "group": "Agents",
   "review": false
- },
- "14": {
-  "name": "Large tool-call arguments",
-  "group": "Tool and terminal output",
-  "review": false
- },
- "15": {
-  "name": "Agent startup cost",
-  "group": "Agents",
-  "review": true
  },
  "16": {
   "name": "Model switch rewrote the cache",
@@ -88,11 +63,6 @@
   "name": "Clarification loops",
   "group": "Retries and rework",
   "review": true
- },
- "19": {
-  "name": "Screenshot accumulation",
-  "group": "Images and browser",
-  "review": false
  },
  "20": {
   "name": "Visual iteration loops",
@@ -149,11 +119,6 @@
   "group": "Exploration and file reading",
   "review": false
  },
- "31": {
-  "name": "Duplicate reading across agents",
-  "group": "Agents",
-  "review": false
- },
  "32": {
   "name": "Agent coordination chatter",
   "group": "Agents",
@@ -205,7 +170,7 @@
   "review": false
  },
  "42": {
-  "name": "Verbose agent reports and briefs",
+  "name": "Verbose agent reports",
   "group": "Agents",
   "review": false
  },
@@ -232,7 +197,7 @@
  "47": {
   "name": "Usage while idle",
   "group": "Retries and rework",
-  "review": false
+  "review": true
  },
  "48": {
   "name": "MCP tool schema bloat",

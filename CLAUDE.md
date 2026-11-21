@@ -15,7 +15,7 @@ Two parts:
 The scripts read real data from `~/.claude/projects/*.jsonl` (Claude Code transcripts) and `~/.claude/metrics/events.jsonl` (hook events). Run them straight from the repo to test changes:
 
 ```bash
-python3 plugins/token-metrics/scripts/leak_report.py --days 30            # 50 curated categories
+python3 plugins/token-metrics/scripts/leak_report.py --days 30            # 43 curated categories
 python3 plugins/token-metrics/scripts/leak_report.py --days 30 --all      # full canvas list (core + A rows)
 python3 plugins/token-metrics/scripts/leak_report.py --all --core         # core leaks only
 python3 plugins/token-metrics/scripts/leak_report.py --days 30 --units tokens   # every token counts as 1; no prices
@@ -42,6 +42,8 @@ CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins
 npm run typecheck && npm run build
 ```
 
+Teammates install and update the plugin with `curl -fsSL https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh | bash` (`install.sh` at the root: adds this repo as the `hermes-engine` marketplace, installs or updates the plugin, uninstalls copies from older zip marketplaces, syncs the scripts, and copies `plugins/token-metrics/bin/token-metrics` into `~/.local/bin`). It installs whatever `main` holds, and Claude Code only updates when `version` in `plugin.json` changes, so bump it with every release. `bin/token-metrics` is the terminal front end: it runs the newest copy under `~/.claude/plugins/cache/hermes-engine/token-metrics/`, so new subcommands go there and stay in line with `commands/*.md`. To test the installer without touching your setup, set `CLAUDE_CONFIG_DIR`, `CC_METRICS_DIR`, `TOKEN_METRICS_BIN` to scratch directories and `TOKEN_METRICS_SOURCE` to this checkout.
+
 Deploy production with `cd leaderboard && npm run deploy`. It typechecks, applies `db/schema.sql` to the production database (pulled with `vercel env pull`), then runs `vercel --prod`. Never run a bare `vercel --prod`: code that needs a new table or column would fail until `db:init` runs.
 
 ## Architecture
@@ -59,9 +61,13 @@ Prompt text is not stored unless `CC_METRICS_KEEP_PROMPTS=1`.
 - A new report module has to be added to the list in `sync_report_scripts()`.
 
 **Three layers of leak definitions:**
-1. `leak_report.py` holds the `Session` transcript parser, the cost model and the **core leaks**. They are keyed by integer id in `LEAKS` (1–26; ids 23–25 are the 4a–4c breakdowns and 26 is 3a, the break-only part of #3, see `PARENT`) and detected in `analyse()` and `cross_session()`.
+1. `leak_report.py` holds the `Session` transcript parser, the cost model and the **core leaks**. They are keyed by integer id in `LEAKS` (1–27; ids 23–25 are the 4a–4c breakdowns, 26 is 3a, the break-only part of #3, and 27 is 17a, unchanged command reruns, see `PARENT`) and detected in `analyse()` and `cross_session()`. `analyse_all()` is the entry point the report, `stats.py` and `research.py` share: it parses every session, runs the prompt check, then the detectors.
 2. `leak_extra.py` holds the canvas's **additional categories** ("A rows") in `ADDITIONAL`. Each one is measured, aliased to a core leak (`SAME_AS`), or given an "unmeasurable" reason. Their finding keys are `lid(n) = 1000 + n`, which keeps them apart from core ids in the shared `findings` dict.
-3. `leak_categories.py` defines the **50 curated categories** that the default report shows. Each sums a list of finding keys, mixing core ids and `lid(...)`. Category numbers are fixed even though the table re-sorts by cost on every run.
+3. `leak_categories.py` defines the **43 curated categories** that the default report shows. Each sums a list of finding keys, mixing core ids and `lid(...)`. Category numbers are fixed even though the table re-sorts by cost on every run, and retired numbers (`RETIRED`) are never reused. `REVIEW` rows (spend to review or information) print in their own table; `REVIEW` and `PART_OF` rows (48 and 49 price part of #1's tokens) are left out of the waste index. `AUDIT-with-original-categories.md` records why each detector works the way it does.
+
+**Thresholds** live in `leak_config.py` (`DEFAULTS`); a person overrides any of them in `config.json` in the metrics directory. Detectors read `CFG[...]`, never a literal, for anything in that file.
+
+**Prompt check.** `prompt_check.py` asks a model (`prompt_check_model`, default Sonnet) to label prompt text through the person's own login: `claude -p --no-session-persistence` with no tools, MCP or settings, and `CC_METRICS_OFF=1` so the hook ignores the child session. Two jobs: per session, whether each typed prompt starts an unrelated task or corrects the last answer (`s.prompt_labels`, used by `Session.tasks()` and #20); per session start, which earlier session in the project it continues or repeats (`s.first_match`, used by A10 and #15). A third job, the model judge, sees each Opus/Fable or Sonnet turn (`model_turns()`: prompt, previous prompt, tools used, lines edited, output and reasoning tokens, start of the reply) and decides whether the next model down would have done it equally well (`s.model_verdicts`, used by #6; unjudged turns use the size heuristic). Labels are cached by hash in `prompt_checks.json` (no prompt text), at most `prompt_check_max_calls` new calls per run, newest sessions first; anything unlabelled falls back to keyword and file-overlap checks. On by default; `prompt_check: false` or `CC_METRICS_PROMPT_CHECK=0` turns it off. Prompt text goes to the model only, never into the payload or the cache.
 
 Detectors call `add_finding(...)` / `add(...)`:
 - `ref` identifies the tool result a finding is about. `merged_items()` uses it to count a result once when two detectors in the same curated row flag it.
@@ -74,7 +80,7 @@ Detectors call `add_finding(...)` / `add(...)`:
   - Session and task counts, and the leak shares, go to the week the session started in.
   - Since 1.5.0 each week and the lifetime block also carry `token_split`, `model_tokens` and `agent_tokens`, and the payload has a `days` list (last 56 days of token totals). These are optional in `validate.ts`, so `SCHEMA` stays 1; the server keeps `days` in `users.days`.
 - `share.py` holds the user's token in `share.json` (mode 0600). It sends `stats.py`'s payload to `POST /api/sync`.
-- On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
+- On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process if the user has joined. Leaving Claude Code (any reason but `clear` and `resume`) passes `--force` and syncs every time; `clear` and `resume` only sync when the last sync is over an hour old. The hook itself returns immediately. A forced sync that finds another one running (`share.lock`) leaves `share.pending`, and the running sync goes once more when it finishes, so the last session is never dropped.
 - The payload must never contain prompt text, project names, file paths or session ids.
 
 **Status line.** `statusline.py` is the status line itself (no arguments: reads Claude Code's status line JSON on stdin and prints one right-aligned line from `prompt_cache`: countdown, session hit rate, chat size, re-read vs cold cost, `/clear` / `/compact` hints) and its installer (`install [keep|replace]`, `off`, run by `/token-metrics:statusline`). Plugin settings can't set the main `statusLine`, so `install` writes it into the user's `~/.claude/settings.json` (backup `.bak-token-metrics`), pointing at the synced copy in `~/.claude/metrics`. A status line the user already had is saved in `statusline.json` there: `keep` runs it and prints its output above ours, `off` restores it. Organisation managed settings override a personal `statusLine`, so `install` warns when they set one. Prices come from `leak_report.price()`; the render path must never raise.

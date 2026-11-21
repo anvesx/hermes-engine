@@ -11,19 +11,17 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
 
 ## Get started
 
-1. **Get the plugin.**
+1. **Install it** with one command in a terminal (macOS):
 
    ```bash
-   git clone https://github.com/devx-commerce/hermes-engine
+   curl -fsSL https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh | bash
    ```
 
-2. **Start Claude Code with the plugin loaded**, then start a new session:
+   It installs the plugin into Claude Code from this repo, removes copies installed from older zip files, and adds a
+   `token-metrics` command to your terminal. Run it again, or `token-metrics update`, to get the latest version.
 
-   ```bash
-   claude --plugin-dir /path/to/hermes-engine/plugins/token-metrics
-   ```
-
-   The plugin runs alongside your own settings and doesn't change your `settings.json`.
+2. **Restart Claude Code** (or run `/reload-plugins` in an open session). The plugin runs alongside your own settings
+   and doesn't change your `settings.json`.
 
 3. **Connect your account.** In Claude Code, run:
 
@@ -50,13 +48,15 @@ leaks" (context and work you pay for without needing it) and shows it all on a p
    /token-metrics:dashboard
    ```
 
-   It syncs your latest numbers first. Your stats also sync on their own at the end of each session, at most once an hour.
+   It syncs your latest numbers first. Your stats also sync on their own, in the background, every time you exit Claude Code.
 
-You can also do steps 3 and 5 from a terminal, without Claude Code and without using tokens. The first time, it signs
-you in with Google:
+Everything also works from a terminal, without Claude Code and without using tokens:
 
 ```bash
-python3 ~/.claude/metrics/share.py dashboard
+token-metrics report        # the token-leak report (last 30 days)
+token-metrics wrapped       # your usage in numbers
+token-metrics dashboard     # sync and open your dashboard (the first time, it signs you in with Google)
+token-metrics help          # everything else
 ```
 
 ## Your dashboard

@@ -7,17 +7,29 @@ alongside your own. Data stays in `~/.claude/metrics/` unless you join the compa
 
 ## Install
 
-Inside Claude Code:
+In a terminal (macOS):
 
-```
-/plugin marketplace add anvesx/hermes-engine
-/plugin install token-metrics@hermes-engine
-/reload-plugins
+```bash
+curl -fsSL https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh | bash
 ```
 
-The same from a terminal: `claude plugin marketplace add anvesx/hermes-engine && claude plugin install token-metrics@hermes-engine`,
-then start `claude` as usual. To join the company leaderboard, run this and sign in with your work Google account in
-the browser tab it opens:
+Then restart Claude Code, or run `/reload-plugins` in an open session. The script (`install.sh` at the repo root):
+
+- adds this repo as the plugin marketplace `hermes-engine`, replacing a zip or folder copy of that name
+- installs or updates `token-metrics@hermes-engine`, and uninstalls `token-metrics` copies installed from other
+  (older zip) marketplaces, so only one copy of the hook records events; your data in `~/.claude/metrics` is kept
+- refreshes the report scripts in `~/.claude/metrics`
+- installs a `token-metrics` command into `~/.local/bin`, adding that folder to `PATH` in `~/.zshrc` if needed
+
+To update, run the same command again or `token-metrics update`. It needs Claude Code (`claude`) and Python 3.8+.
+
+The same without the script, inside Claude Code: `/plugin marketplace add anvesx/hermes-engine`,
+`/plugin install token-metrics@hermes-engine`, `/reload-plugins`; update with `/plugin marketplace update hermes-engine`
+and `/plugin update token-metrics@hermes-engine`.
+To try it for one session without installing: `claude --plugin-dir /path/to/hermes-engine/plugins/token-metrics`
+(the hooks, including the leaderboard sync on exit, only run in sessions started that way).
+
+To join the company leaderboard, run this and sign in with your work Google account in the browser tab it opens:
 
 ```
 /token-metrics:dashboard
@@ -26,21 +38,22 @@ the browser tab it opens:
 No browser? Join with an email code instead: `/token-metrics:dashboard you@devxlabs.ai`, then
 `/token-metrics:dashboard verify <code> Your Name`.
 
-To update: `/plugin marketplace update hermes-engine`, then `/plugin update token-metrics@hermes-engine` and `/reload-plugins`.
+### From a terminal
 
-From a zip instead (it unpacks to a `plugins` folder, which is also a local marketplace named `hermes-engine`):
+Every slash command has a terminal equivalent that runs the same scripts and uses no tokens:
 
-```bash
-cd ~/Downloads && unzip token-metrics.zip
-claude plugin marketplace add ~/Downloads/plugins
-claude plugin install token-metrics@hermes-engine
-```
-
-Installing copies the plugin into Claude Code's plugin cache, so the unzipped folder can be deleted afterwards. To update
-from a newer zip, unzip it over the old folder and run
-`claude plugin marketplace update hermes-engine && claude plugin update token-metrics@hermes-engine`.
-To try it for one session without installing: `claude --plugin-dir ~/Downloads/plugins/token-metrics`
-(the hooks, including the hourly leaderboard sync, only run in sessions started that way).
+| Terminal | In Claude Code |
+|---|---|
+| `token-metrics report [--days N] [--all] [--units tokens]` | `/token-metrics:leak-report` |
+| `token-metrics tasks` | `/token-metrics:task-report` |
+| `token-metrics wrapped` | `/token-metrics:wrapped` |
+| `token-metrics join [email]`, `token-metrics verify CODE` | `/token-metrics:join` |
+| `token-metrics share` | `/token-metrics:share` |
+| `token-metrics dashboard` | `/token-metrics:dashboard` |
+| `token-metrics leaderboard [week\|month\|all]` | `/token-metrics:leaderboard` |
+| `token-metrics export [preview]` | `/token-metrics:research-export` |
+| `token-metrics statusline [keep\|replace\|off]` | `/token-metrics:statusline` |
+| `token-metrics update`, `token-metrics version` | |
 
 ## Use
 
@@ -107,7 +120,7 @@ all-time usage, 12-week charts of tokens, hours, spend, points and waste index a
 leaks next to the company's, model mix, badges with progress, and the leaderboard. Anyone else who opens the same
 link sees only your public card. Set `CC_METRICS_NO_BROWSER=1` to print the link instead of opening it.
 
-After you join, each session end also syncs your stats in the background, at most once an hour. Points come from
+After you join, exiting Claude Code (`/exit`, Ctrl+D or closing the terminal) syncs your stats in the background; `/clear` and `/resume` sync at most once an hour. Points come from
 participation (an active synced week, hooks on 80%+ of sessions, tagging tasks, rating tasks) and from leaking
 less than your own baseline. Tokens, spend and hours are shown and earn badges, but never points. Post your public
 card link and the card image previews on LinkedIn and X.

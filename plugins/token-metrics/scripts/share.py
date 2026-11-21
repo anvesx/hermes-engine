@@ -3,7 +3,7 @@
 share.py - opt-in sync of your aggregate stats to the company leaderboard.
 
 Nothing leaves this machine until you join. After that, the SessionEnd hook runs `sync` in the
-background at most once an hour. What is sent is exactly `python3 stats.py --json`: weekly totals
+background each time you exit Claude Code (at most once an hour after /clear or /resume). What is sent is exactly `python3 stats.py --json`: weekly totals
 and each leak category's share of spend. No prompt text, project names, file paths or session ids.
 
   python3 share.py preview                       # what would be sent; sends nothing
@@ -47,6 +47,8 @@ CARD_FIELDS = ("name", "level", "badges", "streak", "tokens", "hours", "spend")
 LOG_DIR = os.path.expanduser(os.environ.get("CC_METRICS_DIR", "~/.claude/metrics"))
 CONFIG = os.path.join(LOG_DIR, "share.json")
 LOCK = os.path.join(LOG_DIR, "share.lock")
+PENDING = os.path.join(LOG_DIR, "share.pending")   # a forced sync arrived while another was running
+BUSY = {"last": False}                              # the last sync() found another sync holding the lock
 LOG = os.path.join(LOG_DIR, "share.log")
 
 
@@ -159,7 +161,7 @@ def start_join(cfg, email, url, finish):
 
 
 def print_consent():
-    print("Joining shares, from now on and automatically about once an hour:")
+    print("Joining shares, from now on and automatically each time you exit Claude Code:")
     print("  weekly tokens (split by type, model and subagents), daily token totals, API-equivalent spend, active hours")
     print("  and days, session/task counts, tagged and rated task counts, model mix by spend, and each leak category's share.")
     print("It never shares prompt text, project names, file paths or session ids.")
@@ -279,6 +281,7 @@ def verify(cfg, code, name_parts):
 
 def sync(cfg, force=False):
     """Send the payload. Returns False (and logs) instead of raising when run from the hook."""
+    BUSY["last"] = False
     if not cfg.get("token"):
         return False
     if not force and time.time() - cfg.get("last_sync", 0) < SYNC_EVERY_S:
@@ -288,7 +291,10 @@ def sync(cfg, force=False):
         os.close(fd)
     except FileExistsError:
         if time.time() - os.path.getmtime(LOCK) < LOCK_STALE_S:
-            return False          # another sync is running
+            BUSY["last"] = True
+            if force:             # another sync is running; it goes once more when it finishes
+                open(PENDING, "w").close()
+            return False
         os.utime(LOCK)
     try:
         call(cfg, "POST", "/api/sync", payload())
@@ -304,10 +310,19 @@ def sync(cfg, force=False):
 
 def cmd_sync(a, cfg):
     if a.background:
-        try:
-            sync(cfg)
-        except Exception as e:     # the hook must never surface errors
-            log(f"sync failed: {e}")
+        force = a.force
+        for _ in range(3):         # the lock holder repeats while exits queued a sync behind it
+            try:
+                sync(load() if _ else cfg, force=force)
+            except Exception as e:     # the hook must never surface errors
+                log(f"sync failed: {e}")
+            if BUSY["last"] or not os.path.exists(PENDING):
+                break              # another sync holds the lock and will see the marker
+            try:
+                os.remove(PENDING)
+            except OSError:
+                break
+            force = True
         return
     print("synced" if sync(cfg, force=a.force) else "skipped: synced less than an hour ago (use --force)")
 

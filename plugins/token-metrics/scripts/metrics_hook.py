@@ -100,22 +100,24 @@ def main():
     if reply:
         print(json.dumps(reply))
     if ev == "SessionEnd":
-        start_background_sync()
+        # Leaving Claude Code (/exit, Ctrl+D, closing the terminal) syncs every time; /clear and /resume end a session
+        # but you keep working, so those stay at most once an hour.
+        start_background_sync(force=data.get("reason") not in ("clear", "resume"))
 
 
-def start_background_sync():
-    """If the user joined the leaderboard and the last sync is over an hour old, run share.py sync
-    detached, so this hook returns immediately. share.py rechecks the throttle and holds a lock."""
+def start_background_sync(force=False):
+    """If the user joined the leaderboard, run share.py sync detached, so this hook returns immediately.
+    Unless forced, only when the last sync is over an hour old. share.py rechecks and holds a lock."""
     try:
         with open(os.path.join(LOG_DIR, "share.json")) as f:
             cfg = json.load(f)
     except (OSError, ValueError):
         return
-    if not cfg.get("token") or time.time() - cfg.get("last_sync", 0) < SYNC_EVERY_S:
+    if not cfg.get("token") or not force and time.time() - cfg.get("last_sync", 0) < SYNC_EVERY_S:
         return
     script = os.path.join(LOG_DIR, "share.py")
     if os.path.exists(script):
-        subprocess.Popen([sys.executable, script, "sync", "--background"], cwd=LOG_DIR,
+        subprocess.Popen([sys.executable, script, "sync", "--background"] + (["--force"] if force else []), cwd=LOG_DIR,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
 

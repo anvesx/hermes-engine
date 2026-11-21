@@ -42,6 +42,8 @@ CC_METRICS_DIR=/tmp/m CC_METRICS_SHARE_URL=http://localhost:3000 python3 plugins
 npm run typecheck && npm run build
 ```
 
+Teammates install and update the plugin with `curl -fsSL https://raw.githubusercontent.com/anvesx/hermes-engine/main/install.sh | bash` (`install.sh` at the root: adds this repo as the `hermes-engine` marketplace, installs or updates the plugin, uninstalls copies from older zip marketplaces, syncs the scripts, and copies `plugins/token-metrics/bin/token-metrics` into `~/.local/bin`). It installs whatever `main` holds, and Claude Code only updates when `version` in `plugin.json` changes, so bump it with every release. `bin/token-metrics` is the terminal front end: it runs the newest copy under `~/.claude/plugins/cache/hermes-engine/token-metrics/`, so new subcommands go there and stay in line with `commands/*.md`. To test the installer without touching your setup, set `CLAUDE_CONFIG_DIR`, `CC_METRICS_DIR`, `TOKEN_METRICS_BIN` to scratch directories and `TOKEN_METRICS_SOURCE` to this checkout.
+
 Deploy production with `cd leaderboard && npm run deploy`. It typechecks, applies `db/schema.sql` to the production database (pulled with `vercel env pull`), then runs `vercel --prod`. Never run a bare `vercel --prod`: code that needs a new table or column would fail until `db:init` runs.
 
 ## Architecture
@@ -78,7 +80,7 @@ Detectors call `add_finding(...)` / `add(...)`:
   - Session and task counts, and the leak shares, go to the week the session started in.
   - Since 1.5.0 each week and the lifetime block also carry `token_split`, `model_tokens` and `agent_tokens`, and the payload has a `days` list (last 56 days of token totals). These are optional in `validate.ts`, so `SCHEMA` stays 1; the server keeps `days` in `users.days`.
 - `share.py` holds the user's token in `share.json` (mode 0600). It sends `stats.py`'s payload to `POST /api/sync`.
-- On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process, only if the user has joined and the last sync is over an hour old. The hook itself returns immediately.
+- On SessionEnd, `metrics_hook.py` starts `share.py sync --background` as a detached process if the user has joined. Leaving Claude Code (any reason but `clear` and `resume`) passes `--force` and syncs every time; `clear` and `resume` only sync when the last sync is over an hour old. The hook itself returns immediately. A forced sync that finds another one running (`share.lock`) leaves `share.pending`, and the running sync goes once more when it finishes, so the last session is never dropped.
 - The payload must never contain prompt text, project names, file paths or session ids.
 
 **Status line.** `statusline.py` is the status line itself (no arguments: reads Claude Code's status line JSON on stdin and prints one right-aligned line from `prompt_cache`: countdown, session hit rate, chat size, re-read vs cold cost, `/clear` / `/compact` hints) and its installer (`install [keep|replace]`, `off`, run by `/token-metrics:statusline`). Plugin settings can't set the main `statusLine`, so `install` writes it into the user's `~/.claude/settings.json` (backup `.bak-token-metrics`), pointing at the synced copy in `~/.claude/metrics`. A status line the user already had is saved in `statusline.json` there: `keep` runs it and prints its output above ours, `off` restores it. Organisation managed settings override a personal `statusLine`, so `install` warns when they set one. Prices come from `leak_report.price()`; the render path must never raise.

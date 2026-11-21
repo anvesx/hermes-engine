@@ -42,6 +42,7 @@ export async function dashboardFor(userId: string, period: Period, now = new Dat
   const recent = me.weeks.filter((w) => month.has(w.week));
   const company = companyStats(players, month);
   const leaks = leakShares(recent)
+    .filter(([id]) => CATS[id])   // retired categories still sent by older plugin versions
     .map(([id, mine]) => ({ id, mine, company: company.leak[id] ?? 0, name: CATS[id]?.name ?? `Category ${id}`,
                             group: CATS[id]?.group ?? "", review: !!CATS[id]?.review }))
     .slice(0, 8);

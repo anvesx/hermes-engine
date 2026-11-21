@@ -1,7 +1,7 @@
 # token-metrics plugin
 
 Measures every Claude Code task (tokens, cost, latency, frustration, outcome) by category, and ranks
-token leaks by estimated cost in 50 categories built from the team's Leak Categories canvas
+token leaks by estimated cost in 43 categories built from the team's Leak Categories canvas
 (see `token-leak-categories.md` at the repo root). Your settings.json hooks are not modified: plugin hooks run
 alongside your own. Data stays in `~/.claude/metrics/` unless you join the company leaderboard (below).
 
@@ -48,7 +48,7 @@ To try it for one session without installing: `claude --plugin-dir ~/Downloads/p
 |---|---|
 | `[bugfix] the parser drops time zones` | Starts a task in category `bugfix` (the prompt goes to Claude as normal) |
 | `rate 3 ok` | Frustration 1-5 and outcome ok / partial / fail for the task just done. Blocked by the hook, so it costs no tokens |
-| `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display) |
+| `/token-metrics:leak-report` | Leak report for the last 30 days (uses a few thousand tokens to display). Leaks come first, then a separate "Spend to review" table for normal spend that is sometimes avoidable (not counted as waste) |
 | `/token-metrics:task-report` | Metrics by category |
 | `/token-metrics:wrapped` | Your usage in numbers: tokens, API-equivalent spend, active hours, streaks, biggest leaks (local only) |
 | `/token-metrics:research-export` | Writes an anonymous aggregate file for the team's token-leak study (totals, shares and session sizes; no prompts, code, paths, project names or ids). `preview` prints it instead. Nothing is sent: you send the file yourself |
@@ -70,6 +70,11 @@ Add `--units tokens` to count every token as 1 instead of pricing it; cache cate
 that missed the cache, written to it or sent uncached (cache events), since a cache miss sends no extra tokens.
 Item sizes are estimated with a characters-per-token ratio each session measures from its own tool results
 (or a per-tokenizer default); the report states the ratio it used.
+
+Five categories (sessions that never end, restarting too often, correction churn, repeated tasks, bigger model than needed) depend on what a
+prompt means, so the report asks a model to label your prompts (see Privacy). Thresholds such as the starting-context
+limit (60k tokens) can be changed in `~/.claude/metrics/config.json`, for example `{"start_context_threshold": 80000}`;
+the keys and defaults are listed in `token-leak-categories.md`. Unknown keys are ignored.
 
 Newer Claude Code versions record the loaded tool definitions, skill listings and CLAUDE.md files in the
 transcript, so the report can show which MCP servers and skills you load but never use. Sessions from older
@@ -122,6 +127,14 @@ Other commands, not needed for normal use:
 
 Prompt text is not stored, only length, category and whether it looked like a correction.
 Set `CC_METRICS_KEEP_PROMPTS=1` to keep the first 500 characters.
+
+The leak report labels your prompts with a model (the prompt check): it runs `claude -p` with Sonnet through your own
+Claude Code login, so prompt text (the first 500 characters of each typed prompt, short excerpts of earlier sessions
+of the same project, and the start of each Opus/Sonnet turn's final reply) goes to the model, as it does when you use Claude Code. Labels are cached in
+`~/.claude/metrics/prompt_checks.json` by hash, without prompt text, and at most 60 new calls are made per run. It is
+on by default. Turn it off with `"prompt_check": false` in `~/.claude/metrics/config.json` or by setting
+`CC_METRICS_PROMPT_CHECK=0`; the report then falls back to keyword and file-overlap checks. The prompt check never sends
+anything to the leaderboard.
 
 Nothing is sent anywhere until you join (`/token-metrics:dashboard` or `/token-metrics:join`). After that, syncing sends only per-week aggregates:
 tokens (split into input, cache write, cache read and output, by model family and main session vs subagents), daily

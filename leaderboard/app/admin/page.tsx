@@ -37,7 +37,7 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
   const roster = players.map((p) => ({ p, s: companyStats([p], monthWeeks) })).sort((a, b) => b.s.tokens - a.s.tokens);
   const weeks = trend.map((t) => t.week);
   // largest first; rows that would print as 0.0% are hidden
-  const leaks = Object.entries(month.leak).filter(([, v]) => v >= 0.0005).sort((a, b) => b[1] - a[1]);
+  const leaks = Object.entries(month.leak).filter(([k, v]) => v >= 0.0005 && CATS[k]).sort((a, b) => b[1] - a[1]);
   const quiet = scope.filter((p) => !p.last_sync_at || Date.now() - new Date(p.last_sync_at).getTime() > 7 * 86400e3);
   const days = (d: Date | null) => {
     if (!d) return "never";

@@ -35,7 +35,7 @@ def sync_report_scripts(only_if_missing=False):
     here = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(LOG_DIR, exist_ok=True)
     for name in ("analyze.py", "leak_report.py", "leak_extra.py", "leak_categories.py", "stats.py", "share.py", "research.py",
-                 "statusline.py"):
+                 "statusline.py", "leak_config.py", "prompt_check.py"):
         src, dst = os.path.join(here, name), os.path.join(LOG_DIR, name)
         if only_if_missing and os.path.exists(dst):
             continue
@@ -49,6 +49,8 @@ def sync_report_scripts(only_if_missing=False):
 
 
 def main():
+    if os.environ.get("CC_METRICS_OFF") == "1":     # a child `claude -p` run by prompt_check.py
+        return
     try:
         data = json.load(sys.stdin)
     except Exception:

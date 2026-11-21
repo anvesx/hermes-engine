@@ -49,11 +49,7 @@ def day_of(t):
 def collect(root, events):
     """Run the leak detectors over all history; returns (sessions, findings, hook ratings)."""
     hook_prompts, ratings = leak_report.load_hook_prompts(events)
-    findings = defaultdict(list)
-    for sid, entries in leak_report.load_sessions(root, 0).items():
-        leak_report.analyse(leak_report.Session(sid, entries, 2.0, 3600, hook_prompts), findings)
-    if findings["_sessions"]:
-        leak_report.cross_session(findings)
+    findings = leak_report.analyse_all(root, 0, 2.0, 3600, hook_prompts)
     return findings["_sessions"], findings, ratings
 
 
@@ -104,7 +100,8 @@ def leak_shares(findings, sessions):
         if reason is None:
             shares[str(n)] = round(cost / total, 4)
     # an index, not a percentage: categories overlap, so it can pass 1.0. Compared only to the user's own baseline.
-    waste = sum(v for k, v in shares.items() if int(k) not in leak_categories.REVIEW)
+    # Spend to review and rows that price part of another row's tokens are left out.
+    waste = sum(v for k, v in shares.items() if int(k) not in leak_categories.REVIEW and int(k) not in leak_categories.PART_OF)
     return shares, round(waste, 4)
 
 
@@ -116,7 +113,7 @@ def split_findings(findings, sessions):
     for k, items in findings.items():
         if k == "_sessions":
             out[k] = list(sessions)
-        elif k == "_hook_sessions":
+        elif k in ("_hook_sessions", "_origin_sessions", "_snapshot_sessions", "_listing_sessions"):
             out[k] = [sid for sid in items if sid in sids]
         elif isinstance(k, int):
             out[k] = [i for i in items if i.get("session") in keep]
@@ -232,7 +229,7 @@ def summary(p):
         for w in p["weeks"]:
             lines.append(f"| {w['week']} | {fmt_tokens(w['tokens'])} | ${w['cost_usd']:,.2f} | {w['active_hours']:.1f} "
                          f"| {w['sessions']} | {w['tagged_tasks']} | {w['rated_tasks']} | {w['waste_index']:.2f} |")
-        lines.append("\nWaste index sums the non-review leak shares; categories overlap, so compare it only week to week.")
+        lines.append("\nWaste index sums the leak shares, without spend to review and rows that are part of another; categories overlap, so compare it only week to week.")
     return "\n".join(lines)
 
 
